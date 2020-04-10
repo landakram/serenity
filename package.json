@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@cljs-oss/module-deps": "^1.1.1",
+    "shadow-cljs": "^2.8.94",
+    "simple-peer": "^9.6.2"
+  }
+}
