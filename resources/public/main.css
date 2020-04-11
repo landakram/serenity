@@ -1,0 +1,44 @@
+body {
+    font-family: "Lucida Console", Monaco, monospace;
+    font-size: 14px;
+    background-color: #1d1f21;
+    color: #c5c8c6;
+}
+
+.debug {
+    color: #707880;
+}
+
+.warn {
+    color: #de935f;
+}
+
+.info {
+    color: #c5c8c6;
+}
+
+.success {
+    color: #8abeb7;
+}
+
+.error {
+    color: #a54242;
+}
+
+a, a:visited {
+    color: #81a2be;
+}
+
+div.console {
+    width: 100%;
+}
+
+div.console-input {
+    min-height: 1.5em;
+    max-height: 9em;
+    overflow: auto;
+}
+
+div.console-input:focus {
+    outline: 0px solid transparent;
+}

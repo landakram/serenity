@@ -12,5 +12,7 @@ pom.xml.asc
 .hg/
 .shadow-cljs/
 node_modules/
-resources/
+resources/*/**/*.js
+resources/*/**/*.js.map
+resources/*/**/*.edn
 \#*#

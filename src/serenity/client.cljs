@@ -4,7 +4,8 @@
             [clojure.string :as string]
             [crate.core :as crate]
             [cljs.core.async :refer [chan >! <! go]]
-            [simple-peer :as Peer]))
+            [simple-peer :as Peer])
+  (:require-macros [serenity.macros :refer [when-let*]]))
 
 (log/info "Alive.")
 
@@ -25,11 +26,12 @@
 (log/info (str "csrf-token: " @csrf-token))
 
 (def console-el (.getElementById js/document "console"))
-(defn println-gui
-  ([msg] (log/debug msg)
-   (println-gui {} [:pre msg]))
-  ([opts el]
-   (.appendChild console-el (crate/html el))))
+(defn gui-print
+  ([class str]
+   (gui-print [:p {:class (name class)} str]))
+  ([el]
+   (.appendChild console-el (crate/html el))
+   (js/window.scrollTo 0 js/document.body.scrollHeight)))
 
 (let [client (sente/make-channel-socket-client!
                "/ws"
@@ -62,9 +64,11 @@
         (if (some? peer-id)
           (chsk-send! [:serenity/connect {:peer-id peer-id}])
           (do
-            (println-gui (str "Your peer-id is " client-id "."))
-            (println-gui {} [:pre [:b "Send this link to your friend: "]
-                             [:a {:href (peer-link client-id)} (peer-link client-id)]]))))
+            (gui-print :debug (str "Your peer-id is " client-id "."))
+            (gui-print [:p [:b "Send this link to your friend: "]
+                        [:a {:href (peer-link client-id)
+                             :target "_blank"}
+                         (peer-link client-id)]]))))
       (log/infof "Channel socket state change: %s" new-state-map))))
 
 (defmethod -event-msg-handler :chsk/recv
@@ -78,7 +82,7 @@
 
 (defmethod -event-msg-handler :serenity/message
   [{:keys [?data] :as ev-msg}]
-  (println-gui ?data)
+  (gui-print :info ?data)
   (log/info (str ":serenity/message handler with message: " ?data)))
 
 (defn initiator? []
@@ -97,33 +101,33 @@
 
 (.on peer "connect"
      (fn []
-       (println-gui "Connected via WebRTC.")))
+       (gui-print :info "Connected via WebRTC.")))
 
 (defmethod -event-msg-handler :serenity/connected
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [peer-id]} ?data]
-    (println-gui (str "Connected to " peer-id "."))
+    (gui-print :success (str "Connected to " peer-id "."))
     (when (initiator?)
       (go
         (log/debug "Inside go block")
         (let [offer (<! offer-chan)]
-          (println-gui (str "Sending offer:" offer))
+          (gui-print :debug (str "Sending offer: " offer))
           (chsk-send! [:serenity/offer {:offer offer}]))))))
 
 (defmethod -event-msg-handler :serenity/offer
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [offer]} ?data]
-    (println-gui (str "Received offer:" offer))
+    (gui-print :debug (str "Received offer: " offer))
     (.signal peer (js/JSON.parse offer))
     (go
       (let [accept (<! accept-chan)]
-        (println-gui (str "Sending accept:" accept))
+        (gui-print :debug (str "Sending accept:" accept))
         (chsk-send! [:serenity/accept {:accept accept}])))))
 
 (defmethod -event-msg-handler :serenity/accept
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [accept]} ?data]
-    (println-gui (str "Received accept:" accept))
+    (gui-print :debug (str "Received accept:" accept))
     (.signal peer (js/JSON.parse accept))))
 
 (defn event-msg-handler [{:as ev-msg :keys [id ?data event]}]
@@ -140,12 +144,52 @@
   (reset! router
           (sente/start-client-chsk-router! ch-chsk event-msg-handler)))
 
-(let [send-test-message-button (js/document.getElementById "send-test-message")]
-  (.addEventListener send-test-message-button "click"
-                     (fn [e]
-                       (chsk-send! [:serenity/message "hi"])
-                       (.preventDefault e))
-                     true))
+(declare commands)
+(defn display-help []
+  (let [header (str "The following commands are available:")
+        cmd-help (map (fn [[cmd {:keys [description pattern]}]]
+                        [:p [:b pattern] " " description])
+                      commands)]
+    (gui-print [:div [:p header]
+                cmd-help])))
 
-(defn main []
-  (start-router!))
+(def commands
+  {:msg {:pattern "/msg <message>"
+         :description "Send a message to the peer to whom you're connected."
+         :handler (fn [args]
+                    (gui-print "info" (str "you: " args))
+                    (chsk-send! [:serenity/message (str client-id ": " args)]))}
+   :help {:pattern "/help"
+          :description "Display this help message."
+          :handler (fn [_]
+                     (display-help))}})
+
+(defn parse-command [text]
+  (let [regex #"/([a-zA-Z0-9]+) ?(.*)"]
+    (when-let* [[_ cmd args] (re-matches regex text)
+                command (get commands (keyword cmd))]
+      [command args])))
+
+
+(defn run-command [cmd args]
+  ((:handler cmd) args))
+
+(let [console-input (js/document.getElementById "console-input")]
+  (aset js/window "console_input" console-input)
+  (.addEventListener console-input "keypress"
+                     (fn [e]
+                       (let [text (.-textContent console-input)]
+                         (when (= "Enter" (.-key e))
+                           (.preventDefault e)
+                           (if-let [[cmd args] (parse-command text)]
+                             (run-command cmd args)
+                             (gui-print :error "Command not found. Use /help to see available commands."))
+                           (aset console-input "textContent" "")))))
+  (defn main []
+    (start-router!)
+    (.focus console-input)
+    (.addEventListener js/window "click"
+                       (fn [e]
+                         (when (string/blank? (.toString (js/window.getSelection)))
+                           (.focus console-input))))))
+

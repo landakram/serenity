@@ -7,6 +7,7 @@
             [ring.middleware.defaults]
             [ring.middleware.anti-forgery :as anti-forgery]
             [hiccup.core :as hiccup]
+            [hiccup.page :refer [include-css include-js]]
             [taoensso.timbre :as log]
             [taoensso.sente :as sente]
             [taoensso.sente.server-adapters.http-kit :refer (get-sch-adapter)]
@@ -15,7 +16,9 @@
 (let [chsk-server (sente/make-channel-socket!
                    (get-sch-adapter)
                    {:packer :edn
-                    :user-id-fn #(:client-id %)})
+                    :user-id-fn (fn [req]
+                                  (log/debug (:client-id req))
+                                  (:client-id req))})
       {:keys [ch-recv send-fn connected-uids
               ajax-post-fn ajax-get-or-ws-handshake-fn]}
       chsk-server]
@@ -35,23 +38,6 @@
 (defmethod -event-msg-handler :default
   [{:keys [event] :as ev-msg}]
   (log/infof "Unhandled event: %s" event))
-
-(defmethod -event-msg-handler :chsk/state
-  [{:keys [?data] :as ev-msg}]
-  (let [[old-state-map new-state-map] ?data]
-    (if (:first-open? new-state-map)
-      (do
-        (log/infof "Channel socket successfully established!: %s" new-state-map))
-      (log/infof "Channel socket state change: %s" new-state-map))))
-
-(defmethod -event-msg-handler :chsk/recv
-  [{:keys [?data] :as ev-msg}]
-  (log/infof "Push event from server: %s" ev-msg))
-
-(defmethod -event-msg-handler :chsk/handshake
-  [{:keys [?data] :as ev-msg}]
-  (let [[?uid ?csrf-token ?handshake-data] ?data]
-    (log/infof "Handshake: %s" ?data)))
 
 (defonce peers (atom {}))
 
@@ -113,13 +99,19 @@
 
 (defn index [req]
   (hiccup/html
-   [:pre "Welcome to " [:b "SERENITY"] "."]
-   [:blockquote [:pre [:a {:href "https://tvtropes.org/pmwiki/pmwiki.php/Main/CantStopTheSignal"} "Can't stop the signal, Mal. They can never stop the signal."]]]
+   [:head
+    (include-css "main.css")]
+   [:p "Welcome to " [:b "SERENITY"] "."]
+   [:blockquote [:a {:href "https://tvtropes.org/pmwiki/pmwiki.php/Main/CantStopTheSignal"
+                     :target "_blank"}
+                 "Can't stop the signal, Mal. They can never stop the signal."]]
    (let [csrf-token (:anti-forgery-token req)]
      [:div#csrf-token {:data-csrf-token csrf-token}])
-   [:div#console {:style "width: 100%;"}]
-   [:button#send-test-message "ping"]
-   [:script {:src "main.js"}]))
+   [:div#console.console]
+   [:div#console-input.console-input
+    {:contenteditable "true"
+     :autofocus ""}]
+   (include-js "main.js")))
 
 (defroutes routes
   (GET "/" [] index)
@@ -136,7 +128,7 @@
 
 (defn start-server! []
   (reset! server (run-server (app) {:port (:port @opts)
-                                       :thread (:threads @opts)}))
+                                    :thread (:threads @opts)}))
   (log/info (str "Server started on port " (:port @opts))))
 
 (defn stop-server! []
@@ -146,8 +138,8 @@
     (log/info (str "Server stopped"))))
 
 (defn start! []
-  (start-server!)
-  (start-router!))
+  (start-router!)
+  (start-server!))
 
 (defn stop! []
   (stop-server!)
