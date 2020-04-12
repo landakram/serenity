@@ -51,21 +51,36 @@ summary:focus {
     outline: 0px solid transparent;
 }
 
-div.drop-target {
-    position: fixed;
-    padding: 0;
+.drop-target {
     margin: 0;
-    top: 0;
-    left: 0;
-    width: 100%;
+    padding: 0px;
     height: 100%;
-    visibility: hidden;
 }
 
 pre {
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .cmd-list {
     list-style-type: none;
+}
+
+.drop-target.drag {
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.drop-target.drag:after {
+    font-size: 50px;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    content: "☸";
+    /* content: "⬆️"; */
+    text-align: center;
+}
+
+.app {
+    margin: 0;
+    padding: 1px 10px;
 }

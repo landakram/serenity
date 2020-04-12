@@ -102,18 +102,19 @@
    [:head
     (include-css "main.css")
     (include-css "//fonts.googleapis.com/css2?family=Fira+Mono:wght@400;700")]
-   [:p "Welcome to " [:b "SERENITY"] "."]
-   [:blockquote [:a {:href "https://tvtropes.org/pmwiki/pmwiki.php/Main/CantStopTheSignal"
-                     :target "_blank"}
-                 "Can't stop the signal, Mal. They can never stop the signal."]]
-   (let [csrf-token (:anti-forgery-token req)]
-     [:div#csrf-token {:data-csrf-token csrf-token}])
-   [:div#console.console]
-   [:div#console-input.console-input
-    {:contenteditable "true"
-     :autofocus ""}]
-   [:div#drop-target.drop-target]
-   (include-js "main.js")))
+   [:body#drop-target.drop-target
+    [:div.app
+     [:p "Welcome to " [:b "SERENITY"] "."]
+     [:blockquote [:a {:href "https://tvtropes.org/pmwiki/pmwiki.php/Main/CantStopTheSignal"
+                       :target "_blank"}
+                   "Can't stop the signal, Mal. They can never stop the signal."]]
+     (let [csrf-token (:anti-forgery-token req)]
+       [:div#csrf-token {:data-csrf-token csrf-token}])
+     [:div#console.console]
+     [:div#console-input.console-input
+      {:contenteditable "true"
+       :autofocus ""}]]
+    (include-js "main.js")]))
 
 (defroutes routes
   (GET "/" [] index)
