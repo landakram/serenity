@@ -4,6 +4,7 @@
             [clojure.string :as string]
             [crate.core :as crate]
             [cljs.core.async :refer [chan >! <! go]]
+            [drag-drop :as drag-drop]
             [simple-peer :as Peer])
   (:require-macros [serenity.macros :refer [when-let*]]))
 
@@ -82,6 +83,8 @@
 (defn peer-link [peer-id]
   (str js/document.location.href "#" peer-id))
 
+(def signaling-status (atom {:status :disconnected :state {}}))
+
 (defmethod -event-msg-handler :chsk/state
   [{:keys [?data] :as ev-msg}]
   (let [[old-state-map new-state-map] ?data]
@@ -89,11 +92,15 @@
       (do
         (log/infof "Channel socket successfully established!: %s" new-state-map)
         (gui-print :debug (str "Your peer-id is " client-id "."))
+        (gui-print :debug "Connected to signaling server.")
+        (swap! signaling-status assoc :status :established :state new-state-map)
         (if (some? peer-id)
           (chsk-send! [:serenity/connect {:peer-id peer-id}])
           (do
             (run-command (:get-peer-link commands)))))
-      (log/infof "Channel socket state change: %s" new-state-map))))
+      (do
+        (swap! signaling-status assoc :state new-state-map)
+        (log/infof "Channel socket state change: %s" new-state-map)))))
 
 (defmethod -event-msg-handler :chsk/recv
   [{:keys [?data] :as ev-msg}]
@@ -122,13 +129,12 @@
 (def data-chan (chan))
 (.on peer "signal"
      (fn [data]
-       (log/info "SIGNAL" (js/JSON.stringify data))
        (let [ch (if (initiator?) offer-chan accept-chan)]
-         (go (>! ch (js/JSON.stringify data))))))
+         (go (>! ch data)))))
 
 (.on peer "error"
      (fn [err]
-       (gui-print :error err)))
+       (gui-print :error (str "WebRTC error: \"" err "\""))))
 
 (.on peer "connect"
      (fn []
@@ -141,28 +147,39 @@
 (defmethod -event-msg-handler :serenity/connected
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [peer-id]} ?data]
+    (swap! signaling-status assoc :status :connected-to-peer :peer peer-id)
     (gui-print :debug (str "Connected to " peer-id " on signaling server."))
     (when (initiator?)
       (go
         (let [offer (<! offer-chan)]
-          (gui-print :debug (str "Sending offer: " offer))
-          (chsk-send! [:serenity/offer {:offer offer}]))))))
+          (swap! signaling-status assoc :status :sent-offer)
+          (gui-print :debug (str "Sending offer:"))
+          (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify offer nil 2)]])
+          (chsk-send! [:serenity/offer {:offer (js/JSON.stringify offer)}]))))))
 
 (defmethod -event-msg-handler :serenity/offer
   [{:keys [?data] :as ev-msg}]
-  (let [{:keys [offer]} ?data]
-    (gui-print :debug (str "Received offer: " offer))
-    (.signal peer (js/JSON.parse offer))
+  (let [{:keys [offer]} ?data
+        parsed-offer (js/JSON.parse offer)]
+    (swap! signaling-status assoc :status :received-offer)
+    (gui-print :debug (str "Received offer:"))
+    (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-offer nil 2)]])
+    (.signal peer parsed-offer)
     (go
       (let [accept (<! accept-chan)]
-        (gui-print :debug (str "Sending accept:" accept))
-        (chsk-send! [:serenity/accept {:accept accept}])))))
+        (swap! signaling-status assoc :status :sent-accept)
+        (gui-print :debug (str "Sending accept:"))
+        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify accept nil 2)]])
+        (chsk-send! [:serenity/accept {:accept (js/JSON.stringify accept)}])))))
 
 (defmethod -event-msg-handler :serenity/accept
   [{:keys [?data] :as ev-msg}]
-  (let [{:keys [accept]} ?data]
-    (gui-print :debug (str "Received accept:" accept))
-    (.signal peer (js/JSON.parse accept))))
+  (let [{:keys [accept]} ?data
+        parsed-accept (js/JSON.parse accept)]
+    (swap! signaling-status assoc :status :received-accept)
+    (gui-print :debug (str "Received accept:"))
+    (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-accept nil 2)]])
+    (.signal peer parsed-accept)))
 
 (defn event-msg-handler [{:as ev-msg :keys [id ?data event]}]
   (-event-msg-handler ev-msg))
@@ -181,11 +198,11 @@
 (defn display-help []
   (let [header (str "The following commands are available:")
         cmd-help (map (fn [[cmd {:keys [description pattern]}]]
-                        [:p [:b pattern] " " description])
+                        [:li [:b pattern] " " description])
                       commands)]
     (gui-print [:div {:class "info"}
                 [:p header]
-                cmd-help])))
+                [:ul.cmd-list ,cmd-help]])))
 
 (def commands
   {:msg {:pattern "msg <message>"
@@ -201,6 +218,21 @@
                                           [:a {:href (peer-link client-id)
                                                :target "_blank"}
                                            (peer-link client-id)]]))}
+   :status {:pattern "status"
+            :description "Get the status of your connection with a peer."
+            :handler (fn [_]
+                       (gui-print [:p {:class "info"} [:u "Connection status"]])
+                       (gui-print :info "Signaling server:")
+                       (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
+                       (gui-print :info "WebRTC:")
+                       (try
+                         (.getStats peer
+                                    (fn [err report]
+                                      (if err
+                                        (gui-print :error err)
+                                        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))
+                         (catch js/Object e
+                           (gui-print :debug "Disconnected."))))}
    :clear {:pattern "clear"
            :description "Clear console output."
            :handler (fn [_]
@@ -222,23 +254,37 @@
   ([cmd args]
    ((:handler cmd) args)))
 
-(let [console-input (js/document.getElementById "console-input")]
-  (aset js/window "console_input" console-input)
+(defn attach-console-input-focus! [console-input]
+  (.focus console-input)
+  (.addEventListener js/window "click"
+                     (fn [e]
+                       (when (string/blank? (.toString (js/window.getSelection)))
+                         (.focus console-input)))))
+
+(defn attach-console-input! [console-input]
   (.addEventListener console-input "keypress"
                      (fn [e]
                        (let [text (.-textContent console-input)]
                          (when (= "Enter" (.-key e))
-                             (.preventDefault e)
-                             (when (not (string/blank? text))
-                               (if-let [[cmd args] (parse-command text)]
-                                 (run-command cmd args)
-                                 (gui-print [:p {:class "error"}
-                                             "Command not found. Type " [:b "help"] " to see available commands."]))
-                               (aset console-input "textContent" ""))))))
-  (defn main []
-    (start-router!)
-    (.focus console-input)
-    (.addEventListener js/window "click"
-                       (fn [e]
-                         (when (string/blank? (.toString (js/window.getSelection)))
-                           (.focus console-input))))))
+                           (.preventDefault e)
+                           (when (not (string/blank? text))
+                             (if-let [[cmd args] (parse-command text)]
+                               (run-command cmd args)
+                               (gui-print [:p {:class "error"}
+                                           "Command not found. Type " [:b "help"] " to see available commands."]))
+                             (aset console-input "textContent" "")))))))
+
+(defn attach-drag-drop! [drop-target-id]
+  (drag-drop drop-target-id
+             (fn [files pos file-list directories]
+               (log/info "hi")
+               (log/info files)
+               (log/info directories))))
+
+(defn main []
+  (let [console-input (js/document.getElementById "console-input")]
+    (aset js/window "console_input" console-input)
+    (attach-console-input! console-input)
+    (attach-console-input-focus! console-input)
+    (attach-drag-drop! "#drop-target")
+    (start-router!)))

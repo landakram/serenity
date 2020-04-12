@@ -112,6 +112,7 @@
    [:div#console-input.console-input
     {:contenteditable "true"
      :autofocus ""}]
+   [:div#drop-target.drop-target]
    (include-js "main.js")))
 
 (defroutes routes
