@@ -100,7 +100,8 @@
 (defn index [req]
   (hiccup/html
    [:head
-    (include-css "main.css")]
+    (include-css "main.css")
+    (include-css "//fonts.googleapis.com/css2?family=Fira+Mono:wght@400;700")]
    [:p "Welcome to " [:b "SERENITY"] "."]
    [:blockquote [:a {:href "https://tvtropes.org/pmwiki/pmwiki.php/Main/CantStopTheSignal"
                      :target "_blank"}

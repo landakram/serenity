@@ -1,5 +1,5 @@
 body {
-    font-family: "Lucida Console", Monaco, monospace;
+    font-family: "Fira Mono", monospace;
     font-size: 14px;
     background-color: #1d1f21;
     color: #c5c8c6;
@@ -40,5 +40,13 @@ div.console-input {
 }
 
 div.console-input:focus {
+    outline: 0px solid transparent;
+}
+
+details {
+    margin-bottom: 10px;
+}
+
+summary:focus {
     outline: 0px solid transparent;
 }
