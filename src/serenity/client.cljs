@@ -3,7 +3,7 @@
             [taoensso.sente :as sente]
             [clojure.string :as string]
             [crate.core :as crate]
-            [cljs.core.async :refer [chan >! <! go]]
+            [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout]]
             [drag-drop :as drag-drop]
             [simple-peer :as Peer])
   (:require-macros [serenity.macros :refer [when-let*]]))
@@ -12,6 +12,8 @@
 
 (declare commands)
 (declare run-command)
+(declare await)
+(declare deserialize-blob)
 
 (def csrf-token (atom nil))
 
@@ -119,14 +121,15 @@
 (defn initiator? []
   (nil? peer-id))
 
-(def peer (Peer. (clj->js {:initiator (initiator?)
+(def max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
+(def peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
+                           :initiator (initiator?)
                            :trickle false
                            :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
                                                   :username "7243CDF7-62CA-4DCC-82AA-05FB023CDE48"
                                                   :credential "AEFE1791-B5F2-49A1-AAF4-AD750721EA6C"}]}})))
 (def offer-chan (chan))
 (def accept-chan (chan))
-(def data-chan (chan))
 (.on peer "signal"
      (fn [data]
        (let [ch (if (initiator?) offer-chan accept-chan)]
@@ -140,9 +143,44 @@
      (fn []
        (gui-print :success "Connected via WebRTC.")))
 
+;; Should generalize this to multiple files I guess
+(def file (atom nil))
+(defn make-file [metadata]
+  {:metadata metadata
+   :parts []})
+
+(defn finalize-file [{:keys [parts metadata]}]
+  (let [type (:type metadata)
+        blob (js/Blob. (clj->js parts) #js {:type type})
+        blob-url (js/URL.createObjectURL blob)]
+    (gui-print [:a {:href blob-url
+                    :download (:name metadata)}
+                (str "Save " (:name metadata))])))
+
+(def data-chan (chan))
 (.on peer "data"
      (fn [data]
-       (go (>! data-chan data))))
+       (let [f @file]
+         (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
+           ;; TODO: Fix error:
+           ;; Uncaught Error: Assert failed: No more than 1024 pending puts are allowed on a single channel. Consider using a windowed buffer.
+           ;;
+           ;; Need to make this a buffered chan so backpressure is applied
+
+           (go (>! data-chan d))))))
+
+;; For larger files, will probably need to save chunks to IndexedDB.
+;; It's all in-memory right now.
+(go-loop [d (<! data-chan)]
+  (when (some? d)
+    (condp = (:msg-type d)
+      "h" (reset! file (make-file (dissoc d :msg-type)))
+      "c" (swap! file update :parts conj (-> d
+                                             :blob
+                                             deserialize-blob
+                                             <!))
+      "f" (finalize-file @file))
+    (recur (<! data-chan))))
 
 (defmethod -event-msg-handler :serenity/connected
   [{:keys [?data] :as ev-msg}]
@@ -205,42 +243,56 @@
                 [:ul.cmd-list ,cmd-help]])))
 
 (def commands
-  {:msg {:pattern "msg <message>"
-         :description "Send a message to the peer with whom you're connected."
-         :handler (fn [args]
-                    (gui-print "info" (str "you: " args))
-                    (chsk-send! [:serenity/message (str client-id ": " args)]))}
-   :get-peer-link {:pattern "get-peer-link"
-                   :description (str "Print a link to sent to your friend. "
-                                     "When your friend visits the link, you'll be connected over WebRTC.")
-                   :handler (fn [_]
-                              (gui-print [:p [:b "Send this link to your friend: "]
-                                          [:a {:href (peer-link client-id)
-                                               :target "_blank"}
-                                           (peer-link client-id)]]))}
-   :status {:pattern "status"
-            :description "Get the status of your connection with a peer."
-            :handler (fn [_]
-                       (gui-print [:p {:class "info"} [:u "Connection status"]])
-                       (gui-print :info "Signaling server:")
-                       (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
-                       (gui-print :info "WebRTC:")
-                       (try
-                         (.getStats peer
-                                    (fn [err report]
-                                      (if err
-                                        (gui-print :error err)
-                                        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))
-                         (catch js/Object e
-                           (gui-print :debug "Disconnected."))))}
-   :clear {:pattern "clear"
-           :description "Clear console output."
-           :handler (fn [_]
-                      (aset console-el "innerHTML" ""))}
-   :help {:pattern "help"
-          :description "Display this help message."
-          :handler (fn [_]
-                     (display-help))}})
+  {:msg
+   {:pattern "msg <message>"
+    :description "Send a message to the peer with whom you're connected."
+    :handler
+    (fn [args]
+      (gui-print "info" (str "you: " args))
+      (chsk-send! [:serenity/message (str client-id ": " args)]))}
+
+   :get-peer-link
+   {:pattern "get-peer-link"
+    :description (str "Print a link to send to your friend. "
+                      "When your friend visits the link, you'll be connected over WebRTC.")
+    :handler
+    (fn [_]
+      (gui-print [:p [:b "Send this link to your friend: "]
+                  [:a {:href (peer-link client-id)
+                       :target "_blank"}
+                   (peer-link client-id)]]))}
+
+   :status
+   {:pattern "status"
+    :description "Get the status of your connection with a peer."
+    :handler
+    (fn [_]
+      (gui-print [:p {:class "info"} [:u "Connection status"]])
+      (gui-print :info "Signaling server:")
+      (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
+      (gui-print :info "WebRTC:")
+      (try
+        (.getStats peer
+                   (fn [err report]
+                     (if err
+                       (gui-print :error err)
+                       (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))
+        (catch js/Object e
+          (gui-print :debug "Disconnected."))))}
+
+   :clear
+   {:pattern "clear"
+    :description "Clear console output."
+    :handler
+    (fn [_]
+      (aset console-el "innerHTML" ""))}
+
+   :help
+   {:pattern "help"
+    :description "Display this help message."
+    :handler
+    (fn [_]
+      (display-help))}})
 
 (defn parse-command [text]
   (let [regex #"([a-zA-Z0-9-]+) ?(.*)"]
@@ -274,12 +326,118 @@
                                            "Command not found. Type " [:b "help"] " to see available commands."]))
                              (aset console-input "textContent" "")))))))
 
+(defn produce-from
+  ([cb]
+   (produce-from (chan) cb))
+  ([ch cb & args]
+   (go (>! ch (apply cb ch args)))
+   ch))
+
+(defn await [promise]
+  (produce-from
+   (fn [ch]
+     (.then promise (fn [& args]
+                      (go (>! ch args)))))))
+
+(defn serialize-blob [blob]
+  (produce-from
+   (fn [ch]
+     (let [reader (js/FileReader.)]
+       (.readAsDataURL reader blob)
+       (aset reader "onload" (fn []
+                               (go (>! ch (.-result reader)))))))))
+
+(defn deserialize-blob [data-uri]
+  (produce-from
+   (fn [ch]
+     (-> (js/fetch data-uri)
+         (.then (fn [res]
+                  (.blob res)))
+         (.then (fn [blob]
+                  (go (>! ch blob))))))))
+
+;; Some WebRTC learning resources:
+;;
+;; - Optimal chunk size, 16kb: https://viblast.com/blog/2015/2/5/webrtc-data-channel-message-size/
+;; - on bufferredAmount and the need for backpressure: https://viblast.com/blog/2015/2/25/webrtc-bufferedamount/
+;; - Chrome does not implement "blob" binaryType:
+;;     https"//stackoverflow.com/questions/53327281/firefox-not-understanding-that-a-variable-contains-an-arraybuffer-while-chrome-d/"
+;; - Persisting data during download:
+;;     https://stackoverflow.com/questions/29700049/webrtc-datachannels-saving-data-in-file-during-transfer-of-big-files
+(def HEADER :h)
+(def CHUNK :c)
+(def FOOTER :f)
+(defn send-file [file]
+  (let [chunk-size (* 16 1024)
+        ch (chan (/ max-buf-size chunk-size))]
+
+    ;; TODO: Refactor to fix warning:
+    ;;
+    ;; MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added.
+    ;; Use emitter.setMaxListeners() to increase limit
+    ;;
+    ;; Move this to using a single global drain-chan
+    (defn wait-for-drain [peer]
+      (let [ch (chan)]
+        (.on peer "drain"
+             (fn []
+               (go (>! ch :drained)
+                   (close! ch))))
+        ch))
+
+    ;; Reader: puts data onto the simple-peer stream, respecting backpressure
+    ;;
+    ;; simple-peer does its own backpressure for the WebRTC connection to ensure
+    ;; that it does not write too quickly, but we can still fill up simple-peer's
+    ;; writeable buffer too quickly and cause memory issues for ourselves. So we
+    ;; still set highWaterMark when initializing the peer and then respect the
+    ;; stream's 'drain' events.
+    ;;
+    ;; core.async channels with buffers provide the backpressure mechanism.
+    (go-loop [msg (<! ch)]
+      (let [serialized-msg (js/JSON.stringify (clj->js msg))]
+        (when (some? msg)
+          (let [success (.write peer serialized-msg)]
+            (if success
+              (recur (<! ch))
+              (do
+                (log/info "waiting for drain")
+                (<! (wait-for-drain peer))
+                (log/info "drain done")
+                (recur msg)))))))
+
+    ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
+    (go (>! ch {:msg-type HEADER
+                :name (.-name file)
+                :size (.-size file)
+                :type (.-type file)}))
+    (go-loop [start 0
+              end (min (+ start chunk-size) (.-size file))]
+      (let [chunk (.slice file start end)]
+        (log/info start end (.-size file))
+        (cond
+          (= 0 (.-size chunk))
+          (do
+            (>! ch {:msg-type FOOTER})
+            (close! ch)
+            (log/info "Done"))
+
+          :else
+          (do
+            (>! ch {:msg-type CHUNK
+                    :blob (<! (serialize-blob chunk))})
+            (recur end
+                   (min (+ end chunk-size) (.-size file)))))))))
+
 (defn attach-drag-drop! [drop-target-id]
   (drag-drop drop-target-id
              (fn [files pos file-list directories]
-               (log/info "hi")
-               (log/info files)
-               (log/info directories))))
+               (let [file (first files)]
+                 (if (> 1 (count files))
+                   (gui-print :error "Only one file at a time is supported right now.")
+                   (do
+                     (gui-print :info (str "Sending " (.-name file) "..."))
+                     (send-file file)))))))
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
