@@ -84,3 +84,10 @@ pre {
     margin: 0;
     padding: 1px 10px;
 }
+
+.progress-container {
+    border: 2px solid #c5c8c6;
+    margin: 10px 0px;
+    padding: 0px 10px;
+    max-width: 35em;
+}

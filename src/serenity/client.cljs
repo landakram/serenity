@@ -129,11 +129,13 @@
 
 (defonce max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
 (defonce peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
-                           :initiator (initiator?)
-                           :trickle false
-                           :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
-                                                  :username "7243CDF7-62CA-4DCC-82AA-05FB023CDE48"
-                                                  :credential "AEFE1791-B5F2-49A1-AAF4-AD750721EA6C"}]}})))
+                               :initiator (initiator?)
+                               :trickle false
+                               :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
+                                                      ;; TODO: Rotate these and pass them via backend in a data-property
+                                                      ;; I should probably also make these dynamic ugh.
+                                                      :username "7243CDF7-62CA-4DCC-82AA-05FB023CDE48"
+                                                      :credential "AEFE1791-B5F2-49A1-AAF4-AD750721EA6C"}]}})))
 (defonce offer-chan (chan))
 (defonce accept-chan (chan))
 (defonce drain-chan (chan))
@@ -171,18 +173,32 @@
                         :download (:name metadata)}
                     (str "Save " (:name metadata))]])))
 
-;; TODO: Hmm still getting
+;; Looks like simple-peer does this.push without respecting backpressure, so as far as I can tell, there's no
+;; easy way to stop reading from the socket when we're reading too quickly.
 ;;
-;;   "Assert failed: No more than 1024 pending puts are allowed on a single channel. Consider using a windowed buffer."
+;; In fact, it looks like the underlying protocol doesn't really support reading with backpressure:
+;; https://bugs.chromium.org/p/webrtc/issues/detail?id=4616
 ;;
-;; here on large files.
-(defonce data-chan (chan 2000))
+;; So we'd have to implement it ourselves in userland by sending messages back to the peer which is too bad :(
+;;
+;; Instead of doing that, we just make the read buffer here really large. We could also solve the problem by setting
+;; the input stream to "paused mode" (not using the on "data" callback), but that just means it will be buffered in the
+;; stream rather than in this channel. We pray to Yog-Sothoth that we take from this chan fast enough not to fill up
+;; that humongous buffer and that we have enough memory to let it fill up. A buffer size of 1e6 provides 16gb of space
+;; given 16kb size messages.
+;;
+;; Problem solved forever!
+(defonce data-chan (chan 1e6))
 (.on peer "data"
      (fn [data]
        (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
          (go (>! data-chan d)))))
 
-;; For larger files, will probably need to save chunks to IndexedDB.
+
+;; TODO: Currently hangs the tab with a large file! Probably need to move to
+;; a web worker.
+;;
+;; TODO: For larger files, will probably need to save chunks to IndexedDB.
 ;; It's all in-memory right now.
 (declare mount-progress!)
 (defn handle-header [d]
@@ -236,14 +252,17 @@
             percent-done (/ bytes size)
             arrow (condp = up-or-down
                     :upload "ᐃ"
-                    :download "ᐁ")]
-        #_(log/info bytes size percent-done)
+                    :download "ᐁ")
+            send-or-receive (condp = up-or-down
+                              :upload "Sending..."
+                              :download "Receving...")]
         [:div.progress-indicator {:class "info"}
+         (if (not= state :done)
+           [:p {:class "info"} send-or-receive]
+           [:p {:class "success"} "Completed in " (humanize/duration elapsed-time {:number-format str}) "."])
          [:p name " ⌁ " (humanize/filesize size) " " arrow " " (humanize/filesize bytes-per-s) "/s"]
          [:pre "[" ,(repeat (* percent-done 50) "=") ,(repeat (* (- 1 percent-done) 50) " ") "] "
-          (gstring/format "%d" (min 100 (* 100 percent-done))) "%"]
-         (when (= state :done)
-           [:p {:class "success"} "Completed in " (humanize/duration elapsed-time {:number-format str}) "."])]))))
+          (gstring/format "%d" (min 100 (* 100 percent-done))) "% "]]))))
 
 (defn mount-progress! [file up-or-down]
   (let [el (crate/html [:div.progress-container])]
@@ -256,6 +275,7 @@
     (swap! signaling-status assoc :status :connected-to-peer :peer peer-id)
     (gui-print :debug (str "Connected to " peer-id " on signaling server."))
     (when (initiator?)
+      ;; TODO: change how this works to support reconnects
       (go
         (let [offer (<! offer-chan)]
           (swap! signaling-status assoc :status :sent-offer)
@@ -514,9 +534,7 @@
                (let [file (first files)]
                  (if (> 1 (count files))
                    (gui-print :error "Only one file at a time is supported right now.")
-                   (do
-                     (gui-print :info (str "Sending " (.-name file) "..."))
-                     (send-file file)))))))
+                   (send-file file))))))
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
