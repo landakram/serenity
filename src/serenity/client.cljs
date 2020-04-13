@@ -355,6 +355,26 @@
     (fn [_]
       (aset console-el "innerHTML" ""))}
 
+   :expand
+   {:pattern "expand"
+    :description "Expand all collapsed console output. Useful for sharing logs for bug reports."
+    :handler
+    (fn [_]
+      (let [details (js/document.querySelectorAll "details")]
+        (doseq [d (array-seq details)]
+          (aset d "open" true)
+          (js/window.scrollTo 0 js/document.body.scrollHeight))))}
+
+   :collapse
+   {:pattern "collapse"
+    :description "Collapse all expanded console output."
+    :handler
+    (fn [_]
+      (let [details (js/document.querySelectorAll "details")]
+        (doseq [d (array-seq details)]
+          (aset d "open" false)
+          (js/window.scrollTo 0 js/document.body.scrollHeight))))}
+
    :help
    {:pattern "help"
     :description "Display this help message."
