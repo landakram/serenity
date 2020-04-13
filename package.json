@@ -3,6 +3,8 @@
     "@cljs-oss/module-deps": "^1.1.1",
     "buffer": "^5.5.0",
     "drag-drop": "^6.0.0",
+    "react": "16.13.0",
+    "react-dom": "16.13.0",
     "readable-stream": "^3.6.0",
     "shadow-cljs": "^2.8.94",
     "simple-peer": "^9.6.2"

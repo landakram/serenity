@@ -4,7 +4,13 @@
             [clojure.string :as string]
             [crate.core :as crate]
             [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout]]
+            [reagent.core :as r]
+            [reagent.dom :as rdom]
+            [reagent.ratom :refer [reaction]]
             [drag-drop :as drag-drop]
+            [clojure.contrib.humanize :as humanize]
+            [goog.string :as gstring]
+            [goog.string.format]
             [simple-peer :as Peer])
   (:require-macros [serenity.macros :refer [when-let*]]))
 
@@ -15,13 +21,13 @@
 (declare await)
 (declare deserialize-blob)
 
-(def csrf-token (atom nil))
+(defonce csrf-token (atom nil))
 
 (when-let [el (js/document.getElementById "csrf-token")]
   (reset! csrf-token (.getAttribute el "data-csrf-token")))
 
-(def client-id (str (random-uuid)))
-(def peer-id
+(defonce client-id (str (random-uuid)))
+(defonce peer-id
   (let [fragment (.substring js/document.location.hash 1)]
     (if (not (string/blank? fragment))
       fragment
@@ -35,7 +41,7 @@
   (when-let [child (.-lastElementChild el)]
     (.-tagName child)))
 
-(def console-el (.getElementById js/document "console"))
+(defonce console-el (.getElementById js/document "console"))
 (defn gui-print
   ([class str]
    (cond
@@ -70,11 +76,11 @@
                 :packer :edn
                 :client-id client-id
                 :wrap-recv-evs? false})
-      {:keys [chsk ch-recv send-fn state]} client]
-  (def chsk chsk)
-  (def ch-chsk ch-recv)
-  (def chsk-send! send-fn)
-  (def chsk-state state))
+      {:keys [_chsk ch-recv send-fn state]} client]
+  (defonce chsk _chsk)
+  (defonce ch-chsk ch-recv)
+  (defonce chsk-send! send-fn)
+  (defonce chsk-state state))
 
 (defmulti -event-msg-handler :id)
 
@@ -85,7 +91,7 @@
 (defn peer-link [peer-id]
   (str js/document.location.href "#" peer-id))
 
-(def signaling-status (atom {:status :disconnected :state {}}))
+(defonce signaling-status (atom {:status :disconnected :state {}}))
 
 (defmethod -event-msg-handler :chsk/state
   [{:keys [?data] :as ev-msg}]
@@ -121,15 +127,16 @@
 (defn initiator? []
   (nil? peer-id))
 
-(def max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
-(def peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
+(defonce max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
+(defonce peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
                            :initiator (initiator?)
                            :trickle false
                            :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
                                                   :username "7243CDF7-62CA-4DCC-82AA-05FB023CDE48"
                                                   :credential "AEFE1791-B5F2-49A1-AAF4-AD750721EA6C"}]}})))
-(def offer-chan (chan))
-(def accept-chan (chan))
+(defonce offer-chan (chan))
+(defonce accept-chan (chan))
+(defonce drain-chan (chan))
 (.on peer "signal"
      (fn [data]
        (let [ch (if (initiator?) offer-chan accept-chan)]
@@ -143,44 +150,105 @@
      (fn []
        (gui-print :success "Connected via WebRTC.")))
 
+(.on peer "drain"
+     (fn []
+       (go (>! drain-chan :drained))))
+
 ;; Should generalize this to multiple files I guess
-(def file (atom nil))
+(defonce file (r/atom nil))
 (defn make-file [metadata]
   {:metadata metadata
+   :progress {:state :downloading
+              :started (.getTime (js/Date.))
+              :bytes 0}
    :parts []})
 
 (defn finalize-file [{:keys [parts metadata]}]
   (let [type (:type metadata)
         blob (js/Blob. (clj->js parts) #js {:type type})
         blob-url (js/URL.createObjectURL blob)]
-    (gui-print [:a {:href blob-url
-                    :download (:name metadata)}
-                (str "Save " (:name metadata))])))
+    (gui-print [:p [:a {:href blob-url
+                        :download (:name metadata)}
+                    (str "Save " (:name metadata))]])))
 
-(def data-chan (chan))
+;; TODO: Hmm still getting
+;;
+;;   "Assert failed: No more than 1024 pending puts are allowed on a single channel. Consider using a windowed buffer."
+;;
+;; here on large files.
+(defonce data-chan (chan 2000))
 (.on peer "data"
      (fn [data]
-       (let [f @file]
-         (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
-           ;; TODO: Fix error:
-           ;; Uncaught Error: Assert failed: No more than 1024 pending puts are allowed on a single channel. Consider using a windowed buffer.
-           ;;
-           ;; Need to make this a buffered chan so backpressure is applied
-
-           (go (>! data-chan d))))))
+       (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
+         (go (>! data-chan d)))))
 
 ;; For larger files, will probably need to save chunks to IndexedDB.
 ;; It's all in-memory right now.
+(declare mount-progress!)
+(defn handle-header [d]
+  (reset! file (make-file (dissoc d :msg-type)))
+  (mount-progress! file :download))
+
+(defn mark-progress [file bytes]
+  (update-in file [:progress :bytes] + bytes))
+
+(defn mark-done [file]
+  (assoc-in file [:progress :state] :done))
+
+(defn handle-chunk [d]
+  (go
+    (let [blob (-> d
+                   :blob
+                   deserialize-blob
+                   <!)]
+      (swap! file
+             (fn [file]
+               (-> file
+                   (update :parts conj blob)
+                   (mark-progress (.-size blob))
+                   ))))))
+
+(defn handle-footer [d]
+  (swap! file mark-done)
+  (finalize-file @file))
+
 (go-loop [d (<! data-chan)]
   (when (some? d)
     (condp = (:msg-type d)
-      "h" (reset! file (make-file (dissoc d :msg-type)))
-      "c" (swap! file update :parts conj (-> d
-                                             :blob
-                                             deserialize-blob
-                                             <!))
-      "f" (finalize-file @file))
+      "h" (handle-header d)
+      "c" (<! (handle-chunk d))
+      "f" (handle-footer d))
     (recur (<! data-chan))))
+
+(defn progress-indicator [file up-or-down]
+  (let [f (r/atom @file)]
+    (add-watch file (:name @file)
+               (fn [key ref old-state new-state]
+                 (reset! f new-state)
+                 (when (= :done (get-in new-state [:progress :state]))
+                   (remove-watch ref key))))
+    (fn []
+      (let [{:keys [metadata progress]} @f
+            {:keys [state started bytes]} progress
+            {:keys [name size]} metadata
+            elapsed-time (- (.getTime  (js/Date.)) started)
+            bytes-per-s (* 1000 (/ bytes elapsed-time))
+            percent-done (/ bytes size)
+            arrow (condp = up-or-down
+                    :upload "ᐃ"
+                    :download "ᐁ")]
+        #_(log/info bytes size percent-done)
+        [:div.progress-indicator {:class "info"}
+         [:p name " ⌁ " (humanize/filesize size) " " arrow " " (humanize/filesize bytes-per-s) "/s"]
+         [:pre "[" ,(repeat (* percent-done 50) "=") ,(repeat (* (- 1 percent-done) 50) " ") "] "
+          (gstring/format "%d" (min 100 (* 100 percent-done))) "%"]
+         (when (= state :done)
+           [:p {:class "success"} "Completed in " (humanize/duration elapsed-time {:number-format str}) "."])]))))
+
+(defn mount-progress! [file up-or-down]
+  (let [el (crate/html [:div.progress-container])]
+    (rdom/render [progress-indicator file up-or-down] el)
+    (.appendChild console-el el)))
 
 (defmethod -event-msg-handler :serenity/connected
   [{:keys [?data] :as ev-msg}]
@@ -330,7 +398,7 @@
   ([cb]
    (produce-from (chan) cb))
   ([ch cb & args]
-   (go (>! ch (apply cb ch args)))
+   (apply cb ch args)
    ch))
 
 (defn await [promise]
@@ -364,26 +432,19 @@
 ;;     https"//stackoverflow.com/questions/53327281/firefox-not-understanding-that-a-variable-contains-an-arraybuffer-while-chrome-d/"
 ;; - Persisting data during download:
 ;;     https://stackoverflow.com/questions/29700049/webrtc-datachannels-saving-data-in-file-during-transfer-of-big-files
-(def HEADER :h)
-(def CHUNK :c)
-(def FOOTER :f)
+(defonce HEADER :h)
+(defonce CHUNK :c)
+(defonce FOOTER :f)
 (defn send-file [file]
   (let [chunk-size (* 16 1024)
-        ch (chan (/ max-buf-size chunk-size))]
+        ch (chan (/ max-buf-size chunk-size))
+        header-msg {:msg-type HEADER
+                    :name (.-name file)
+                    :size (.-size file)
+                    :type (.-type file)}
+        progress-file (atom (make-file header-msg))]
 
-    ;; TODO: Refactor to fix warning:
-    ;;
-    ;; MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added.
-    ;; Use emitter.setMaxListeners() to increase limit
-    ;;
-    ;; Move this to using a single global drain-chan
-    (defn wait-for-drain [peer]
-      (let [ch (chan)]
-        (.on peer "drain"
-             (fn []
-               (go (>! ch :drained)
-                   (close! ch))))
-        ch))
+    (mount-progress! progress-file :upload)
 
     ;; Reader: puts data onto the simple-peer stream, respecting backpressure
     ;;
@@ -401,29 +462,27 @@
             (if success
               (recur (<! ch))
               (do
-                (log/info "waiting for drain")
-                (<! (wait-for-drain peer))
-                (log/info "drain done")
+                #_(log/info "waiting for drain")
+                (<! drain-chan)
+                #_(log/info "drain done")
                 (recur msg)))))))
 
     ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
-    (go (>! ch {:msg-type HEADER
-                :name (.-name file)
-                :size (.-size file)
-                :type (.-type file)}))
+    (go (>! ch header-msg))
     (go-loop [start 0
               end (min (+ start chunk-size) (.-size file))]
       (let [chunk (.slice file start end)]
-        (log/info start end (.-size file))
         (cond
           (= 0 (.-size chunk))
           (do
+            (swap! progress-file mark-done)
             (>! ch {:msg-type FOOTER})
             (close! ch)
             (log/info "Done"))
 
           :else
           (do
+            (swap! progress-file mark-progress (.-size chunk))
             (>! ch {:msg-type CHUNK
                     :blob (<! (serialize-blob chunk))})
             (recur end
