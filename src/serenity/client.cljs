@@ -237,14 +237,22 @@
     (recur (<! data-chan))))
 
 (defn progress-indicator [file up-or-down]
-  (let [f (r/atom @file)]
+  (let [f (atom @file)
+        debounced-f (r/atom @f)]
     (add-watch file (:name @file)
-               (fn [key ref old-state new-state]
-                 (reset! f new-state)
-                 (when (= :done (get-in new-state [:progress :state]))
+               (fn [key ref old-state {:keys [progress]}]
+                 (swap! f assoc :progress progress)
+                 (when (= :done (get-in @f [:progress :state]))
                    (remove-watch ref key))))
+
+    (go-loop []
+      (<! (timeout 1000))
+      (reset! debounced-f @f)
+      (when (not= :done (get-in @debounced-f [:progress :state]))
+        (recur)))
+
     (fn []
-      (let [{:keys [metadata progress]} @f
+      (let [{:keys [metadata progress]} @debounced-f
             {:keys [state started bytes]} progress
             {:keys [name size]} metadata
             elapsed-time (- (.getTime  (js/Date.)) started)
@@ -255,7 +263,7 @@
                     :download "ᐁ")
             send-or-receive (condp = up-or-down
                               :upload "Sending..."
-                              :download "Receving...")]
+                              :download "Receiving...")]
         [:div.progress-indicator {:class "info"}
          (if (not= state :done)
            [:p {:class "info"} send-or-receive]
