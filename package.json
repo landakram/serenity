@@ -7,6 +7,7 @@
     "react-dom": "16.13.0",
     "readable-stream": "^3.6.0",
     "shadow-cljs": "^2.8.94",
-    "simple-peer": "^9.6.2"
+    "simple-peer": "^9.6.2",
+    "streamsaver": "^2.0.4"
   }
 }

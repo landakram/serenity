@@ -11,6 +11,7 @@
             [clojure.contrib.humanize :as humanize]
             [goog.string :as gstring]
             [goog.string.format]
+            ["streamsaver" :as streamSaver]
             [simple-peer :as Peer])
   (:require-macros [serenity.macros :refer [when-let*]]))
 
@@ -19,7 +20,7 @@
 (declare commands)
 (declare run-command)
 (declare await)
-(declare deserialize-blob)
+(declare deserialize-array-buffer)
 
 (defonce csrf-token (atom nil))
 
@@ -194,15 +195,15 @@
        (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
          (go (>! data-chan d)))))
 
-
-;; TODO: Currently hangs the tab with a large file! Probably need to move to
-;; a web worker.
-;;
-;; TODO: For larger files, will probably need to save chunks to IndexedDB.
-;; It's all in-memory right now.
 (declare mount-progress!)
+(defonce stream-saver-writer (atom nil))
 (defn handle-header [d]
   (reset! file (make-file (dissoc d :msg-type)))
+  (reset! stream-saver-writer
+          (-> (.createWriteStream streamSaver
+                                  (get-in @file [:metadata :name])
+               #js {:size (get-in @file [:metadata :size])})
+              (.getWriter)))
   (mount-progress! file :download))
 
 (defn mark-progress [file bytes]
@@ -213,20 +214,22 @@
 
 (defn handle-chunk [d]
   (go
-    (let [blob (-> d
-                   :blob
-                   deserialize-blob
-                   <!)]
+    (let [buf (-> d
+                  :blob
+                  deserialize-array-buffer
+                  <!
+                  (js/Uint8Array. ))]
+      (.write @stream-saver-writer buf)
       (swap! file
              (fn [file]
                (-> file
-                   (update :parts conj blob)
-                   (mark-progress (.-size blob))
+                   (mark-progress (.-byteLength buf))
                    ))))))
 
 (defn handle-footer [d]
   (swap! file mark-done)
-  (finalize-file @file))
+  (.close @stream-saver-writer)
+  #_(finalize-file @file))
 
 (go-loop [d (<! data-chan)]
   (when (some? d)
@@ -463,14 +466,14 @@
        (aset reader "onload" (fn []
                                (go (>! ch (.-result reader)))))))))
 
-(defn deserialize-blob [data-uri]
+(defn deserialize-array-buffer [data-uri]
   (produce-from
    (fn [ch]
      (-> (js/fetch data-uri)
          (.then (fn [res]
-                  (.blob res)))
-         (.then (fn [blob]
-                  (go (>! ch blob))))))))
+                  (.arrayBuffer res)))
+         (.then (fn [array-buf]
+                  (go (>! ch array-buf))))))))
 
 ;; Some WebRTC learning resources:
 ;;
