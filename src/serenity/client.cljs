@@ -505,7 +505,7 @@
                 #_(log/info "waiting for drain")
                 (<! drain-chan)
                 #_(log/info "drain done")
-                (recur msg)))))))
+                (recur (<! ch))))))))
 
     ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
     (go (>! ch header-msg))
