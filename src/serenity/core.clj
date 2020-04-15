@@ -2,6 +2,7 @@
   (:gen-class)
   (:require [compojure.core :refer [defroutes GET POST DELETE ANY context]]
             [compojure.route :refer [files not-found]]
+            [environ.core :refer [env]]
             [org.httpkit.server :refer [run-server]]
             [ring.logger.timbre :refer [wrap-with-logger]]
             [ring.middleware.defaults]
@@ -109,7 +110,9 @@
                        :target "_blank"}
                    "Can't stop the signal, Mal. They can never stop the signal."]]
      (let [csrf-token (:anti-forgery-token req)]
-       [:div#csrf-token {:data-csrf-token csrf-token}])
+       [:div#app-data {:data-csrf-token csrf-token
+                       :data-turn-username (env :turn-username)
+                       :data-turn-password (env :turn-password)}])
      [:div#console.console]
      [:div#console-input.console-input
       {:contenteditable "true"

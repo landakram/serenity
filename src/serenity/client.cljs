@@ -25,9 +25,13 @@
 (declare help-header)
 
 (defonce csrf-token (atom nil))
+(defonce turn-username (atom nil))
+(defonce turn-password (atom nil))
 
-(when-let [el (js/document.getElementById "csrf-token")]
-  (reset! csrf-token (.getAttribute el "data-csrf-token")))
+(when-let [el (js/document.getElementById "app-data")]
+  (reset! csrf-token (.getAttribute el "data-csrf-token"))
+  (reset! turn-username (.getAttribute el "data-turn-username"))
+  (reset! turn-password (.getAttribute el "data-turn-password")))
 
 (defonce client-id (str (random-uuid)))
 (defonce peer-id
@@ -143,10 +147,8 @@
                                :initiator (initiator?)
                                :trickle false
                                :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
-                                                      ;; TODO: Rotate these and pass them via backend in a data-property
-                                                      ;; I should probably also make these dynamic ugh.
-                                                      :username "7243CDF7-62CA-4DCC-82AA-05FB023CDE48"
-                                                      :credential "AEFE1791-B5F2-49A1-AAF4-AD750721EA6C"}]}})))
+                                                      :username @turn-username
+                                                      :credential @turn-password}]}})))
 (defonce offer-chan (chan))
 (defonce accept-chan (chan))
 (defonce drain-chan (chan))
