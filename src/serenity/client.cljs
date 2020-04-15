@@ -2,8 +2,9 @@
   (:require [taoensso.timbre :as log]
             [taoensso.sente :as sente]
             [clojure.string :as string]
+            [cljs.core.match :refer-macros [match]]
             [crate.core :as crate]
-            [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout]]
+            [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
             [reagent.core :as r]
             [reagent.dom :as rdom]
             [reagent.ratom :refer [reaction]]
@@ -21,6 +22,7 @@
 (declare run-command)
 (declare await)
 (declare deserialize-array-buffer)
+(declare help-header)
 
 (defonce csrf-token (atom nil))
 
@@ -37,6 +39,13 @@
 (log/info (str "client-id: " client-id))
 (log/info (str "peer-id: " peer-id))
 (log/info (str "csrf-token: " @csrf-token))
+
+(defn produce-from
+  ([cb]
+   (produce-from (chan) cb))
+  ([ch cb & args]
+   (apply cb ch args)
+   ch))
 
 (defn last-child-tag [el]
   (when-let [child (.-lastElementChild el)]
@@ -106,6 +115,7 @@
         (if (some? peer-id)
           (chsk-send! [:serenity/connect {:peer-id peer-id}])
           (do
+            (gui-print :info (help-header))
             (run-command (:get-peer-link commands)))))
       (do
         (swap! signaling-status assoc :state new-state-map)
@@ -151,7 +161,8 @@
 
 (.on peer "connect"
      (fn []
-       (gui-print :success "Connected via WebRTC.")))
+       (gui-print :success "Connected via WebRTC.")
+       (gui-print :info "To share a file, drag and drop it into this browser window.")))
 
 (.on peer "drain"
      (fn []
@@ -284,6 +295,7 @@
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [peer-id]} ?data]
     (swap! signaling-status assoc :status :connected-to-peer :peer peer-id)
+    (gui-print :debug (str "Connecting to " peer-id "..."))
     (gui-print :debug (str "Connected to " peer-id " on signaling server."))
     (when (initiator?)
       ;; TODO: change how this works to support reconnects
@@ -332,14 +344,31 @@
   (reset! router
           (sente/start-client-chsk-router! ch-chsk event-msg-handler)))
 
+(defn help-header []
+  [:p [:b "SERENITY"] " is a peer-to-peer file sharing tool. By sending your " [:b "peer link"]
+   " to a friend, your browsers will be directly connected over an encrypted channel without a 3rd party intermediate."])
+
 (defn display-help []
-  (let [header (str "The following commands are available:")
-        cmd-help (map (fn [[cmd {:keys [description pattern]}]]
+  (let [cmd-help (map (fn [[cmd {:keys [description pattern]}]]
                         [:li [:b pattern] " " description])
                       commands)]
     (gui-print [:div {:class "info"}
-                [:p header]
+                (help-header)
+                [:p "Once you're connected, you can share files by dragging and dropping them into this browser window."]
+                [:p "The following commands are also available:"]
                 [:ul.cmd-list ,cmd-help]])))
+
+(defn get-peer-status []
+  (produce-from
+   (fn [ch]
+     (try
+       (.getStats peer
+                  (fn [err report]
+                    (if err
+                      (put! ch [:error err])
+                      (put! ch [:status {:connected (.-connected peer) :report report}]))))
+       (catch js/Object e
+         (put! ch [:disconnected]))))))
 
 (def commands
   {:msg
@@ -356,7 +385,7 @@
                       "When your friend visits the link, you'll be connected over WebRTC.")
     :handler
     (fn [_]
-      (gui-print [:p [:b "Send this link to your friend: "]
+      (gui-print [:p [:b "To get started, send this link to your friend: "]
                   [:a {:href (peer-link client-id)
                        :target "_blank"}
                    (peer-link client-id)]]))}
@@ -366,18 +395,25 @@
     :description "Get the status of your connection with a peer."
     :handler
     (fn [_]
-      (gui-print [:p {:class "info"} [:u "Connection status"]])
-      (gui-print :info "Signaling server:")
-      (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
-      (gui-print :info "WebRTC:")
-      (try
-        (.getStats peer
-                   (fn [err report]
-                     (if err
-                       (gui-print :error err)
-                       (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))
-        (catch js/Object e
-          (gui-print :debug "Disconnected."))))}
+      (go
+        (gui-print [:p {:class "info"} [:u "Connection status"]])
+        (gui-print :info "Signaling server:")
+        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
+        (gui-print :info "WebRTC:")
+        (let [status (<! (get-peer-status))]
+          (match
+           status 
+           [:error err]
+           (gui-print :error err)
+
+           [:disconnected]
+           (gui-print [:p {:class "debug"} "Disconnected"])
+
+           [:status {:connected connected :report report}]
+           (do
+             (aset js/window "peer" peer)
+             (gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
+             (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
 
    :clear
    {:pattern "clear"
@@ -444,13 +480,6 @@
                                (gui-print [:p {:class "error"}
                                            "Command not found. Type " [:b "help"] " to see available commands."]))
                              (aset console-input "textContent" "")))))))
-
-(defn produce-from
-  ([cb]
-   (produce-from (chan) cb))
-  ([ch cb & args]
-   (apply cb ch args)
-   ch))
 
 (defn await [promise]
   (produce-from
@@ -543,9 +572,25 @@
   (drag-drop drop-target-id
              (fn [files pos file-list directories]
                (let [file (first files)]
-                 (if (> 1 (count files))
-                   (gui-print :error "Only one file at a time is supported right now.")
-                   (send-file file))))))
+                 (go
+                   (cond
+                     (> 1 (count files))
+                     (gui-print :error "Only one file at a time is supported right now.")
+
+                     (let [[status args] (<! (get-peer-status))]
+                       (or (= status :error)
+                           (= status :disconnected)
+                           (and
+                            (= status :status)
+                            (not (get args :connected)))))
+                     (do
+                       (gui-print :error "You must be connected with someone over WebRTC to send files.")
+                       (gui-print [:p {:class "error"}
+                                   "Connected with a peer by sending them your peer link. "
+                                   "Type " [:b "help"] " for more details."]))
+
+                     :else
+                     (send-file file)))))))
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]

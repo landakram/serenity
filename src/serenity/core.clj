@@ -183,6 +183,3 @@
 
     (reset! opts options)
     (start!)))
-
-(doseq [uid (:any @connected-uids)]
-  (chsk-send! uid [:serenity/message "This is a test."]))
