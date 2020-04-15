@@ -101,6 +101,11 @@
 (defn index [req]
   (hiccup/html
    [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport"
+            :content "width=device-width, initial-scale=1"}]
+    [:meta {:property "og:title"
+            :content "SERENITY: P2P file transfer"}]
     (include-css "main.css")
     (include-css "//fonts.googleapis.com/css2?family=Fira+Mono:wght@400;700")]
    [:body#drop-target.drop-target

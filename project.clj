@@ -30,5 +30,5 @@
                            :simple-peer "v9.6.2"}
                 :install-deps true
                 :pretty-print true}}]}
-  :clean-targets ^{:protect false} ["resources/public/main.js"]
+  :clean-targets ^{:protect false} ["resources/public/cljs-runtime"]
   :aliases {"start" ["do" "clean," "cljsbuild" "once," "run"]})

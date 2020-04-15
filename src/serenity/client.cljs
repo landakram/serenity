@@ -466,13 +466,13 @@
 (defn attach-console-input-focus! [console-input]
   (.focus console-input)
   (.addEventListener js/window "click"
-                     (fn [e]
+                     (fn [^js e]
                        (when (string/blank? (.toString (js/window.getSelection)))
                          (.focus console-input)))))
 
 (defn attach-console-input! [console-input]
   (.addEventListener console-input "keypress"
-                     (fn [e]
+                     (fn [^js e]
                        (let [text (.-textContent console-input)]
                          (when (= "Enter" (.-key e))
                            (.preventDefault e)

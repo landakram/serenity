@@ -8,4 +8,5 @@
  :builds {:app {:target :browser
                 :output-dir "resources/public/"
                 :asset-path "/"
+                :compiler-options {:infer-externs :auto}
                 :modules {:main {:init-fn serenity.client/main}}}}}

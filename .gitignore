@@ -1,10 +1,12 @@
-/target
+*.jar
+/target/default/*
+/target/uberjar/*
+!/target/uberjar/serenity-0.1.0-SNAPSHOT-standalone.jar
 /classes
 /checkouts
 profiles.clj
 pom.xml
 pom.xml.asc
-*.jar
 *.class
 /.lein-*
 /.nrepl-port
