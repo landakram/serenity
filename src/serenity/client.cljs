@@ -357,7 +357,7 @@
           (sente/start-client-chsk-router! ch-chsk event-msg-handler)))
 
 (defn help-header []
-  [:p [:b "SERENITY"] " is a peer-to-peer file sharing tool. By sending your " [:b "peer link"]
+  [:p [:b "SERENITY"] " is a peer-to-peer file sharing tool. When you send your " [:b "peer link"]
    " to a friend, your browsers will be directly connected over an encrypted channel without a 3rd party intermediate."])
 
 (defn display-help []
