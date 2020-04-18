@@ -10,10 +10,11 @@
             [reagent.ratom :refer [reaction]]
             [drag-drop :as drag-drop]
             [clojure.contrib.humanize :as humanize]
+            [serenity.peer :as peer]
+            [serenity.util :as util]
             [goog.string :as gstring]
             [goog.string.format]
-            ["streamsaver" :as streamSaver]
-            [simple-peer :as Peer])
+            ["streamsaver" :as streamSaver])
   (:require-macros [serenity.macros :refer [when-let*]]))
 
 (log/info "Alive.")
@@ -43,13 +44,6 @@
 (log/info (str "client-id: " client-id))
 (log/info (str "peer-id: " peer-id))
 (log/info (str "csrf-token: " @csrf-token))
-
-(defn produce-from
-  ([cb]
-   (produce-from (chan) cb))
-  ([ch cb & args]
-   (apply cb ch args)
-   ch))
 
 (defn last-child-tag [el]
   (when-let [child (.-lastElementChild el)]
@@ -142,71 +136,15 @@
 (defn initiator? []
   (nil? peer-id))
 
-(defonce max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
-
-(defn make-peer [initiator?]
-  (let [peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
-                              :initiator initiator?
-                              :trickle false
-                              :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
-                                                     :username @turn-username
-                                                     :credential @turn-password}]}}))
-        offer-chan (chan)
-        accept-chan (chan)
-        drain-chan (chan)
-
-        ;; Looks like simple-peer does this.push without respecting backpressure, so as far as I can tell, there's no
-        ;; easy way to stop reading from the socket when we're reading too quickly.
-        ;;
-        ;; In fact, it looks like the underlying protocol doesn't really support reading with backpressure:
-        ;; https://bugs.chromium.org/p/webrtc/issues/detail?id=4616
-        ;;
-        ;; So we'd have to implement it ourselves in userland by sending messages back to the peer which is too bad :(
-        ;;
-        ;; Instead of doing that, we just make the read buffer here really large. We could also solve the problem by setting
-        ;; the input stream to "paused mode" (not using the on "data" callback), but that just means it will be buffered in the
-        ;; stream rather than in this channel. We pray to Yog-Sothoth that we take from this chan fast enough not to fill up
-        ;; that humongous buffer and that we have enough memory to let it fill up. A buffer size of 1e6 provides 16gb of space
-        ;; given 16kb size messages.
-        ;;
-        ;; Problem solved forever!
-        data-chan (chan 1e6)]
-
-    (.on peer "signal"
-         (fn [data]
-           (let [ch (if initiator? offer-chan accept-chan)]
-             (go (>! ch data)))))
-
-    (.on peer "error"
-         (fn [err]
-           (gui-print :error (str "WebRTC error: \"" err "\""))))
-
-    (.on peer "connect"
-         (fn []
-           (gui-print :success "Connected via WebRTC.")
-           (gui-print :info "To share a file, drag and drop it into this browser window.")))
-
-    (.on peer "drain"
-         (fn []
-           (go (>! drain-chan :drained))))
-
-    (.on peer "data"
-         (fn [data]
-           (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
-             (go (>! data-chan d)))))
-
-    {:peer peer
-     :offer-chan offer-chan
-     :accept-chan accept-chan
-     :drain-chan drain-chan
-     :data-chan data-chan}))
-
-(let [p (make-peer (initiator?))]
-  (defonce peer (:peer p))
-  (defonce offer-chan (:offer-chan p))
-  (defonce accept-chan (:accept-chan p))
-  (defonce drain-chan (:drain-chan p))
-  (defonce data-chan (:data-chan p)))
+(let [ice-servers [{:urls "turn:coturn.markhudnall.com:3478"
+                    :username @turn-username
+                    :credential @turn-password}]
+      on-error (fn [err]
+                 (gui-print :error (str "WebRTC error: \"" err "\"")))
+      on-connect (fn []
+                   (gui-print :success "Connected via WebRTC.")
+                   (gui-print :info "To share a file, drag and drop it into this browser window."))]
+  (defonce p (peer/make-peer (initiator?) ice-servers on-connect on-error)))
 
 ;; Should generalize this to multiple files I guess
 (defonce file (r/atom nil))
@@ -254,13 +192,13 @@
   (swap! file mark-done)
   (.close (:writer @file)))
 
-(go-loop [d (<! data-chan)]
+(go-loop [d (<! (:data-chan p))]
   (when (some? d)
     (condp = (:msg-type d)
       "h" (handle-header d)
       "c" (<! (handle-chunk d))
       "f" (handle-footer d))
-    (recur (<! data-chan))))
+    (recur (<! (:data-chan p)))))
 
 (defn progress-indicator [file up-or-down]
   (let [f (atom @file)
@@ -312,7 +250,7 @@
     (when (initiator?)
       ;; TODO: change how this works to support reconnects
       (go
-        (let [offer (<! offer-chan)]
+        (let [offer (<! (:offer-chan p))]
           (swap! signaling-status assoc :status :sent-offer)
           (gui-print :debug (str "Sending offer:"))
           (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify offer nil 2)]])
@@ -325,9 +263,9 @@
     (swap! signaling-status assoc :status :received-offer)
     (gui-print :debug (str "Received offer:"))
     (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-offer nil 2)]])
-    (.signal peer parsed-offer)
+    (peer/signal p parsed-offer)
     (go
-      (let [accept (<! accept-chan)]
+      (let [accept (<! (:accept-chan p))]
         (swap! signaling-status assoc :status :sent-accept)
         (gui-print :debug (str "Sending accept:"))
         (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify accept nil 2)]])
@@ -340,7 +278,7 @@
     (swap! signaling-status assoc :status :received-accept)
     (gui-print :debug (str "Received accept:"))
     (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-accept nil 2)]])
-    (.signal peer parsed-accept)))
+    (peer/signal p parsed-accept)))
 
 (defn event-msg-handler [{:as ev-msg :keys [id ?data event]}]
   (-event-msg-handler ev-msg))
@@ -369,18 +307,6 @@
                 [:p "Once you're connected, you can share files by dragging and dropping them into this browser window."]
                 [:p "The following commands are also available:"]
                 [:ul.cmd-list ,cmd-help]])))
-
-(defn get-peer-status []
-  (produce-from
-   (fn [ch]
-     (try
-       (.getStats peer
-                  (fn [err report]
-                    (if err
-                      (put! ch [:error err])
-                      (put! ch [:status {:connected (.-connected peer) :report report}]))))
-       (catch js/Object e
-         (put! ch [:disconnected]))))))
 
 (def commands
   {:msg
@@ -412,7 +338,7 @@
         (gui-print :info "Signaling server:")
         (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
         (gui-print :info "WebRTC:")
-        (let [status (<! (get-peer-status))]
+        (let [status (<! (peer/status p))]
           (match
            status 
            [:error err]
@@ -423,7 +349,7 @@
 
            [:status {:connected connected :report report}]
            (do
-             (aset js/window "peer" peer)
+             (aset js/window "peer" (:peer p))
              (gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
              (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
 
@@ -494,13 +420,13 @@
                              (aset console-input "textContent" "")))))))
 
 (defn await [promise]
-  (produce-from
+  (util/produce-from
    (fn [ch]
      (.then promise (fn [& args]
                       (go (>! ch args)))))))
 
 (defn serialize-blob [blob]
-  (produce-from
+  (util/produce-from
    (fn [ch]
      (let [reader (js/FileReader.)]
        (.readAsDataURL reader blob)
@@ -508,7 +434,7 @@
                                (go (>! ch (.-result reader)))))))))
 
 (defn deserialize-array-buffer [data-uri]
-  (produce-from
+  (util/produce-from
    (fn [ch]
      (-> (js/fetch data-uri)
          (.then (fn [res]
@@ -527,9 +453,9 @@
 (defonce HEADER :h)
 (defonce CHUNK :c)
 (defonce FOOTER :f)
-(defn send-file [file]
+(defn send-file [{:keys [drain-chan] :as p} file]
   (let [chunk-size (* 16 1024)
-        ch (chan (/ max-buf-size chunk-size))
+        ch (chan (/ peer/max-buf-size chunk-size))
         header-msg {:msg-type HEADER
                     :name (.-name file)
                     :size (.-size file)
@@ -550,13 +476,11 @@
     (go-loop [msg (<! ch)]
       (let [serialized-msg (js/JSON.stringify (clj->js msg))]
         (when (some? msg)
-          (let [success (.write peer serialized-msg)]
+          (let [success (peer/write p serialized-msg)]
             (if success
               (recur (<! ch))
               (do
-                #_(log/info "waiting for drain")
                 (<! drain-chan)
-                #_(log/info "drain done")
                 (recur (<! ch))))))))
 
     ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
@@ -589,7 +513,7 @@
                      (> 1 (count files))
                      (gui-print :error "Only one file at a time is supported right now.")
 
-                     (let [[status args] (<! (get-peer-status))]
+                     (let [[status args] (<! (peer/status p))]
                        (or (= status :error)
                            (= status :disconnected)
                            (and
@@ -602,7 +526,7 @@
                                    "Type " [:b "help"] " for more details."]))
 
                      :else
-                     (send-file file)))))))
+                     (send-file p file)))))))
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
