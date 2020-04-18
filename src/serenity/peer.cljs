@@ -1,5 +1,6 @@
 (ns serenity.peer
-  (:require [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
+  (:require [taoensso.timbre :as log]
+            [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
             [serenity.util :as util]
             [simple-peer :as Peer]))
 
@@ -61,8 +62,12 @@
 (defn signal [{:keys [peer]} offer-or-accept]
   (.signal peer offer-or-accept))
 
-(defn write [{:keys [peer]} msg]
-  (.write peer msg))
+(defn write [{:keys [peer drain-chan]} msg]
+  (go
+    (let [success (.write peer msg)]
+      (when-not success
+        (log/debug "draining")
+        (<! drain-chan)))))
 
 (defn status [{:keys [peer]}]
   (util/produce-from

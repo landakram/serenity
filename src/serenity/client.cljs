@@ -476,12 +476,8 @@
     (go-loop [msg (<! ch)]
       (let [serialized-msg (js/JSON.stringify (clj->js msg))]
         (when (some? msg)
-          (let [success (peer/write p serialized-msg)]
-            (if success
-              (recur (<! ch))
-              (do
-                (<! drain-chan)
-                (recur (<! ch))))))))
+          (<! (peer/write p serialized-msg))
+          (recur (<! ch)))))
 
     ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
     (go (>! ch header-msg))
