@@ -143,41 +143,83 @@
   (nil? peer-id))
 
 (defonce max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
-(defonce peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
-                               :initiator (initiator?)
-                               :trickle false
-                               :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
-                                                      :username @turn-username
-                                                      :credential @turn-password}]}})))
-(defonce offer-chan (chan))
-(defonce accept-chan (chan))
-(defonce drain-chan (chan))
-(.on peer "signal"
-     (fn [data]
-       (let [ch (if (initiator?) offer-chan accept-chan)]
-         (go (>! ch data)))))
 
-(.on peer "error"
-     (fn [err]
-       (gui-print :error (str "WebRTC error: \"" err "\""))))
+(defn make-peer [initiator?]
+  (let [peer (Peer. (clj->js {:writableHighWaterMark max-buf-size
+                              :initiator initiator?
+                              :trickle false
+                              :config {:iceServers [{:urls "turn:coturn.markhudnall.com:3478"
+                                                     :username @turn-username
+                                                     :credential @turn-password}]}}))
+        offer-chan (chan)
+        accept-chan (chan)
+        drain-chan (chan)
 
-(.on peer "connect"
-     (fn []
-       (gui-print :success "Connected via WebRTC.")
-       (gui-print :info "To share a file, drag and drop it into this browser window.")))
+        ;; Looks like simple-peer does this.push without respecting backpressure, so as far as I can tell, there's no
+        ;; easy way to stop reading from the socket when we're reading too quickly.
+        ;;
+        ;; In fact, it looks like the underlying protocol doesn't really support reading with backpressure:
+        ;; https://bugs.chromium.org/p/webrtc/issues/detail?id=4616
+        ;;
+        ;; So we'd have to implement it ourselves in userland by sending messages back to the peer which is too bad :(
+        ;;
+        ;; Instead of doing that, we just make the read buffer here really large. We could also solve the problem by setting
+        ;; the input stream to "paused mode" (not using the on "data" callback), but that just means it will be buffered in the
+        ;; stream rather than in this channel. We pray to Yog-Sothoth that we take from this chan fast enough not to fill up
+        ;; that humongous buffer and that we have enough memory to let it fill up. A buffer size of 1e6 provides 16gb of space
+        ;; given 16kb size messages.
+        ;;
+        ;; Problem solved forever!
+        data-chan (chan 1e6)]
 
-(.on peer "drain"
-     (fn []
-       (go (>! drain-chan :drained))))
+    (.on peer "signal"
+         (fn [data]
+           (let [ch (if initiator? offer-chan accept-chan)]
+             (go (>! ch data)))))
+
+    (.on peer "error"
+         (fn [err]
+           (gui-print :error (str "WebRTC error: \"" err "\""))))
+
+    (.on peer "connect"
+         (fn []
+           (gui-print :success "Connected via WebRTC.")
+           (gui-print :info "To share a file, drag and drop it into this browser window.")))
+
+    (.on peer "drain"
+         (fn []
+           (go (>! drain-chan :drained))))
+
+    (.on peer "data"
+         (fn [data]
+           (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
+             (go (>! data-chan d)))))
+
+    {:peer peer
+     :offer-chan offer-chan
+     :accept-chan accept-chan
+     :drain-chan drain-chan
+     :data-chan data-chan}))
+
+(let [p (make-peer (initiator?))]
+  (defonce peer (:peer p))
+  (defonce offer-chan (:offer-chan p))
+  (defonce accept-chan (:accept-chan p))
+  (defonce drain-chan (:drain-chan p))
+  (defonce data-chan (:data-chan p)))
 
 ;; Should generalize this to multiple files I guess
 (defonce file (r/atom nil))
 (defn make-file [metadata]
-  {:metadata metadata
-   :progress {:state :downloading
-              :started (.getTime (js/Date.))
-              :bytes 0}
-   :parts []})
+  (let [{:keys [size name]} metadata
+        writer (-> streamSaver
+                   (.createWriteStream name #js {:size size})
+                   (.getWriter))]
+    {:metadata metadata
+     :progress {:state :downloading
+                :started (.getTime (js/Date.))
+                :bytes 0}
+     :writer writer}))
 
 (defn finalize-file [{:keys [parts metadata]}]
   (let [type (:type metadata)
@@ -187,36 +229,9 @@
                         :download (:name metadata)}
                     (str "Save " (:name metadata))]])))
 
-;; Looks like simple-peer does this.push without respecting backpressure, so as far as I can tell, there's no
-;; easy way to stop reading from the socket when we're reading too quickly.
-;;
-;; In fact, it looks like the underlying protocol doesn't really support reading with backpressure:
-;; https://bugs.chromium.org/p/webrtc/issues/detail?id=4616
-;;
-;; So we'd have to implement it ourselves in userland by sending messages back to the peer which is too bad :(
-;;
-;; Instead of doing that, we just make the read buffer here really large. We could also solve the problem by setting
-;; the input stream to "paused mode" (not using the on "data" callback), but that just means it will be buffered in the
-;; stream rather than in this channel. We pray to Yog-Sothoth that we take from this chan fast enough not to fill up
-;; that humongous buffer and that we have enough memory to let it fill up. A buffer size of 1e6 provides 16gb of space
-;; given 16kb size messages.
-;;
-;; Problem solved forever!
-(defonce data-chan (chan 1e6))
-(.on peer "data"
-     (fn [data]
-       (let [d (js->clj (js/JSON.parse data) :keywordize-keys true)]
-         (go (>! data-chan d)))))
-
 (declare mount-progress!)
-(defonce stream-saver-writer (atom nil))
 (defn handle-header [d]
   (reset! file (make-file (dissoc d :msg-type)))
-  (reset! stream-saver-writer
-          (-> (.createWriteStream streamSaver
-                                  (get-in @file [:metadata :name])
-               #js {:size (get-in @file [:metadata :size])})
-              (.getWriter)))
   (mount-progress! file :download))
 
 (defn mark-progress [file bytes]
@@ -232,17 +247,12 @@
                   deserialize-array-buffer
                   <!
                   (js/Uint8Array. ))]
-      (.write @stream-saver-writer buf)
-      (swap! file
-             (fn [file]
-               (-> file
-                   (mark-progress (.-byteLength buf))
-                   ))))))
+      (.write (:writer @file) buf)
+      (swap! file mark-progress (.-byteLength buf)))))
 
 (defn handle-footer [d]
   (swap! file mark-done)
-  (.close @stream-saver-writer)
-  #_(finalize-file @file))
+  (.close (:writer @file)))
 
 (go-loop [d (<! data-chan)]
   (when (some? d)
