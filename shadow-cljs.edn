@@ -4,9 +4,14 @@
                 [reagent "0.10.0"]
                 [clojure-humanize "0.2.2"]
                 [crate "0.2.5"]
-                [org.clojure/core.match "1.0.0"]]
+                [org.clojure/core.match "1.0.0"]
+                [mount "0.1.16"]]
  :builds {:app {:target :browser
                 :output-dir "resources/public/"
                 :asset-path "/"
                 :compiler-options {:infer-externs :auto}
-                :modules {:main {:init-fn serenity.client/main}}}}}
+                :modules {:main {:init-fn serenity.client/main}}}
+          :test {:target :browser-test
+                 :test-dir "resources/public/js/test"
+                 :devtools {:http-port 8021
+                            :http-root "resources/public/js/test"}}}}

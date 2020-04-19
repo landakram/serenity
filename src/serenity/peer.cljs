@@ -1,7 +1,10 @@
 (ns serenity.peer
   (:require [taoensso.timbre :as log]
             [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
+            [mount.core :as mount]
             [serenity.util :as util]
+            [serenity.config :refer [config]]
+            [mount.core :refer [defstate]]
             [simple-peer :as Peer]))
 
 (defonce max-buf-size (* 64 1024)) ;; 64kb, also the max for simple-peer's internal WebRTC backpressure
@@ -80,3 +83,10 @@
                       (put! ch [:status {:connected (.-connected peer) :report report}]))))
        (catch js/Object e
          (put! ch [:disconnected]))))))
+
+(defstate peer
+  :start (let [ice-servers (:ice-servers @config)
+               initiator? (get-in (mount/args) [:peer :initiator?])
+               on-error (get-in (mount/args) [:peer :on-error])
+               on-connect (get-in (mount/args) [:peer :on-connect])]
+           (make-peer initiator? ice-servers on-connect on-error)))

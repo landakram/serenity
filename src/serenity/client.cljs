@@ -2,6 +2,7 @@
   (:require [taoensso.timbre :as log]
             [taoensso.sente :as sente]
             [clojure.string :as string]
+            [mount.core :refer [defstate] :as mount]
             [cljs.core.match :refer-macros [match]]
             [crate.core :as crate]
             [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
@@ -10,40 +11,20 @@
             [reagent.ratom :refer [reaction]]
             [drag-drop :as drag-drop]
             [clojure.contrib.humanize :as humanize]
+            [serenity.config :refer [config]]
             [serenity.peer :as peer]
             [serenity.util :as util]
+            [serenity.channel-socket :refer [channel-socket]]
             [goog.string :as gstring]
             [goog.string.format]
             ["streamsaver" :as streamSaver])
   (:require-macros [serenity.macros :refer [when-let*]]))
-
-(log/info "Alive.")
 
 (declare commands)
 (declare run-command)
 (declare await)
 (declare deserialize-array-buffer)
 (declare help-header)
-
-(defonce csrf-token (atom nil))
-(defonce turn-username (atom nil))
-(defonce turn-password (atom nil))
-
-(when-let [el (js/document.getElementById "app-data")]
-  (reset! csrf-token (.getAttribute el "data-csrf-token"))
-  (reset! turn-username (.getAttribute el "data-turn-username"))
-  (reset! turn-password (.getAttribute el "data-turn-password")))
-
-(defonce client-id (str (random-uuid)))
-(defonce peer-id
-  (let [fragment (.substring js/document.location.hash 1)]
-    (if (not (string/blank? fragment))
-      fragment
-      nil)))
-
-(log/info (str "client-id: " client-id))
-(log/info (str "peer-id: " peer-id))
-(log/info (str "csrf-token: " @csrf-token))
 
 (defn last-child-tag [el]
   (when-let [child (.-lastElementChild el)]
@@ -77,19 +58,6 @@
      (.appendChild console-el (crate/html el)))
    (js/window.scrollTo 0 js/document.body.scrollHeight)))
 
-(let [client (sente/make-channel-socket-client!
-               "/ws"
-               @csrf-token
-               {:type :auto
-                :packer :edn
-                :client-id client-id
-                :wrap-recv-evs? false})
-      {:keys [_chsk ch-recv send-fn state]} client]
-  (defonce chsk _chsk)
-  (defonce ch-chsk ch-recv)
-  (defonce chsk-send! send-fn)
-  (defonce chsk-state state))
-
 (defmulti -event-msg-handler :id)
 
 (defmethod -event-msg-handler :default
@@ -103,15 +71,16 @@
 
 (defmethod -event-msg-handler :chsk/state
   [{:keys [?data] :as ev-msg}]
-  (let [[old-state-map new-state-map] ?data]
+  (let [[old-state-map new-state-map] ?data
+        {:keys [chsk-send!]} @channel-socket]
     (if (:first-open? new-state-map)
       (do
         (log/infof "Channel socket successfully established!: %s" new-state-map)
-        (gui-print :debug (str "Your peer-id is " client-id "."))
+        (gui-print :debug (str "Your peer-id is " (:client-id @config) "."))
         (gui-print :debug "Connected to signaling server.")
         (swap! signaling-status assoc :status :established :state new-state-map)
-        (if (some? peer-id)
-          (chsk-send! [:serenity/connect {:peer-id peer-id}])
+        (if (some? (:peer-id @config))
+          (chsk-send! [:serenity/connect {:peer-id (:peer-id @config)}])
           (do
             (gui-print :info (help-header))
             (run-command (:get-peer-link commands)))))
@@ -134,17 +103,7 @@
   (log/info (str ":serenity/message handler with message: " ?data)))
 
 (defn initiator? []
-  (nil? peer-id))
-
-(let [ice-servers [{:urls "turn:coturn.markhudnall.com:3478"
-                    :username @turn-username
-                    :credential @turn-password}]
-      on-error (fn [err]
-                 (gui-print :error (str "WebRTC error: \"" err "\"")))
-      on-connect (fn []
-                   (gui-print :success "Connected via WebRTC.")
-                   (gui-print :info "To share a file, drag and drop it into this browser window."))]
-  (defonce p (peer/make-peer (initiator?) ice-servers on-connect on-error)))
+  (nil? (:peer-id @config)))
 
 ;; Should generalize this to multiple files I guess
 (defonce file (r/atom nil))
@@ -192,13 +151,14 @@
   (swap! file mark-done)
   (.close (:writer @file)))
 
-(go-loop [d (<! (:data-chan p))]
-  (when (some? d)
-    (condp = (:msg-type d)
-      "h" (handle-header d)
-      "c" (<! (handle-chunk d))
-      "f" (handle-footer d))
-    (recur (<! (:data-chan p)))))
+(defn start-peer-listener! [p]
+  (go-loop [d (<! (:data-chan p))]
+    (when (some? d)
+      (condp = (:msg-type d)
+        "h" (handle-header d)
+        "c" (<! (handle-chunk d))
+        "f" (handle-footer d))
+      (recur (<! (:data-chan p))))))
 
 (defn progress-indicator [file up-or-down]
   (let [f (atom @file)
@@ -243,14 +203,15 @@
 
 (defmethod -event-msg-handler :serenity/connected
   [{:keys [?data] :as ev-msg}]
-  (let [{:keys [peer-id]} ?data]
+  (let [{:keys [peer-id]} ?data
+        {:keys [chsk-send!]} @channel-socket]
     (swap! signaling-status assoc :status :connected-to-peer :peer peer-id)
     (gui-print :debug (str "Connecting to " peer-id "..."))
     (gui-print :debug (str "Connected to " peer-id " on signaling server."))
     (when (initiator?)
       ;; TODO: change how this works to support reconnects
       (go
-        (let [offer (<! (:offer-chan p))]
+        (let [offer (<! (:offer-chan @peer/peer))]
           (swap! signaling-status assoc :status :sent-offer)
           (gui-print :debug (str "Sending offer:"))
           (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify offer nil 2)]])
@@ -259,13 +220,14 @@
 (defmethod -event-msg-handler :serenity/offer
   [{:keys [?data] :as ev-msg}]
   (let [{:keys [offer]} ?data
-        parsed-offer (js/JSON.parse offer)]
+        parsed-offer (js/JSON.parse offer)
+        {:keys [chsk-send!]} @channel-socket]
     (swap! signaling-status assoc :status :received-offer)
     (gui-print :debug (str "Received offer:"))
     (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-offer nil 2)]])
-    (peer/signal p parsed-offer)
+    (peer/signal @peer/peer parsed-offer)
     (go
-      (let [accept (<! (:accept-chan p))]
+      (let [accept (<! (:accept-chan @peer/peer))]
         (swap! signaling-status assoc :status :sent-accept)
         (gui-print :debug (str "Sending accept:"))
         (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify accept nil 2)]])
@@ -278,21 +240,10 @@
     (swap! signaling-status assoc :status :received-accept)
     (gui-print :debug (str "Received accept:"))
     (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-accept nil 2)]])
-    (peer/signal p parsed-accept)))
+    (peer/signal @peer/peer parsed-accept)))
 
 (defn event-msg-handler [{:as ev-msg :keys [id ?data event]}]
   (-event-msg-handler ev-msg))
-
-(defonce router (atom nil))
-
-(defn stop-router! []
-  (when-let [stop-fn @router]
-    (stop-fn)))
-
-(defn start-router! []
-  (stop-router!)
-  (reset! router
-          (sente/start-client-chsk-router! ch-chsk event-msg-handler)))
 
 (defn help-header []
   [:p [:b "SERENITY"] " is a peer-to-peer file sharing tool. When you send your " [:b "peer link"]
@@ -314,8 +265,9 @@
     :description "Send a message to the peer with whom you're connected."
     :handler
     (fn [args]
-      (gui-print "info" (str "you: " args))
-      (chsk-send! [:serenity/message (str client-id ": " args)]))}
+      (let [{:keys [chsk-send!]} @channel-socket]
+        (gui-print "info" (str "you: " args))
+        (chsk-send! [:serenity/message (str (:client-id @config) ": " args)])))}
 
    :get-peer-link
    {:pattern "get-peer-link"
@@ -324,9 +276,9 @@
     :handler
     (fn [_]
       (gui-print [:p [:b "To get started, send this link to your friend: "]
-                  [:a {:href (peer-link client-id)
+                  [:a {:href (peer-link (:client-id @config))
                        :target "_blank"}
-                   (peer-link client-id)]]))}
+                   (peer-link (:client-id @config))]]))}
 
    :status
    {:pattern "status"
@@ -338,7 +290,7 @@
         (gui-print :info "Signaling server:")
         (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
         (gui-print :info "WebRTC:")
-        (let [status (<! (peer/status p))]
+        (let [status (<! (peer/status @peer/peer))]
           (match
            status 
            [:error err]
@@ -349,7 +301,7 @@
 
            [:status {:connected connected :report report}]
            (do
-             (aset js/window "peer" (:peer p))
+             (aset js/window "peer" (:peer @peer/peer))
              (gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
              (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
 
@@ -453,7 +405,7 @@
 (defonce HEADER :h)
 (defonce CHUNK :c)
 (defonce FOOTER :f)
-(defn send-file [{:keys [drain-chan] :as p} file]
+(defn send-file [p file]
   (let [chunk-size (* 16 1024)
         ch (chan (/ peer/max-buf-size chunk-size))
         header-msg {:msg-type HEADER
@@ -509,7 +461,7 @@
                      (> 1 (count files))
                      (gui-print :error "Only one file at a time is supported right now.")
 
-                     (let [[status args] (<! (peer/status p))]
+                     (let [[status args] (<! (peer/status @peer/peer))]
                        (or (= status :error)
                            (= status :disconnected)
                            (and
@@ -522,12 +474,27 @@
                                    "Type " [:b "help"] " for more details."]))
 
                      :else
-                     (send-file p file)))))))
+                     (send-file @peer/peer file)))))))
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
+    (mount/start-with-args {:router {:event-handler event-msg-handler}
+                            :peer {:ice-servers (:ice-servers @config)
+                                   :initiator? (initiator?)
+                                   :on-connect (fn []
+                                                 (gui-print :success "Connected via WebRTC.")
+                                                 (gui-print :info "To share a file, drag and drop it into this browser window."))
+                                   :on-error (fn [err]
+                                               (gui-print :error (str "WebRTC error: \"" err "\"")))}})
+
+    (log/info "Alive.")
+    (log/info (str "client-id: " (:client-id @config)))
+    (log/info (str "peer-id: " (:peer-id @config)))
+    (log/info (str "csrf-token: " (:csrf-token @config)))
+
     (aset js/window "console_input" console-input)
     (attach-console-input! console-input)
     (attach-console-input-focus! console-input)
     (attach-drag-drop! "#drop-target")
-    (start-router!)))
+
+    (start-peer-listener! @peer/peer)))

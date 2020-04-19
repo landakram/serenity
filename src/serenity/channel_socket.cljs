@@ -1,13 +1,9 @@
 (ns serenity.channel-socket
-  (:require [taoensso.sente :as sente])
-  (:require-macros [mount.core :refer [defstate]]))
+  (:require [serenity.config :refer [config]]
+            [taoensso.sente :as sente]
+            [mount.core :refer [defstate args]]))
 
-(declare chsk)
-(declare ch-chsk)
-(declare chsk-send!)
-(declare chsk-state)
-
-(defn start-chsk! [csrf-token client-id]
+(defn start-chsk [{:keys [client-id csrf-token]}]
   (let [client (sente/make-channel-socket-client!
                 "/ws"
                 csrf-token
@@ -16,18 +12,24 @@
                  :client-id client-id
                  :wrap-recv-evs? false})
         {:keys [_chsk ch-recv send-fn state]} client]
-    (defonce chsk _chsk)
-    (defonce ch-chsk ch-recv)
-    (defonce chsk-send! send-fn)
-    (defonce chsk-state state)))
+    {:chsk _chsk
+     :ch-chsk ch-recv
+     :chsk-send! send-fn
+     :chsk-state state}))
 
-(defonce router (atom nil))
+;; TODO: should prob define :stop
+;; Probably worth turning chsk into a protocol instead of map too
+(defstate channel-socket :start (start-chsk @config))
 
-(defn stop-router! []
-  (when-let [stop-fn @router]
-    (stop-fn)))
+(defn stop-router [stop-fn]
+  (stop-fn))
 
-(defn start-router! [ch-chsk event-msg-handler]
-  (stop-router!)
-  (reset! router
-          (sente/start-client-chsk-router! ch-chsk event-msg-handler)))
+(defn start-router [{:keys [event-handler channel-socket]}]
+  (let [{:keys [ch-chsk]} channel-socket]
+    (sente/start-client-chsk-router! ch-chsk event-handler)))
+
+(defstate router
+  :start (let [{:keys [router]} (args)]
+           (start-router {:channel-socket @channel-socket
+                          :event-handler (:event-handler router)}))
+  :stop (stop-router @router))
