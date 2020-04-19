@@ -480,7 +480,7 @@
           (recur (<! ch)))))
 
     ;; Writer: put file onto the chan in chunks, with header and footer metadata messages
-    (go (>! ch header-msg))
+    (put! ch header-msg)
     (go-loop [start 0
               end (min (+ start chunk-size) (.-size file))]
       (let [chunk (.slice file start end)]
@@ -518,7 +518,7 @@
                      (do
                        (gui-print :error "You must be connected with someone over WebRTC to send files.")
                        (gui-print [:p {:class "error"}
-                                   "Connected with a peer by sending them your peer link. "
+                                   "Connect with a peer by sending them your peer link. "
                                    "Type " [:b "help"] " for more details."]))
 
                      :else
