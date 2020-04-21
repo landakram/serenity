@@ -33,11 +33,11 @@
     (.-tagName child)))
 
 (defonce console-el (.getElementById js/document "console"))
-(defn gui-print
+(defn -gui-print
   ([class str]
    (cond
      :else
-     (gui-print [:p {:class (name class)} str])))
+     (-gui-print [:p {:class (name class)} str])))
   ([el]
    ;; Collapse consecutive debug statements into a <details>
    (cond
@@ -60,6 +60,8 @@
      (.appendChild console-el (crate/html el)))
    (js/window.scrollTo 0 js/document.body.scrollHeight)))
 
+(defstate gui-print :start -gui-print)
+
 (defmulti -event-msg-handler :id)
 
 (defmethod -event-msg-handler :default
@@ -78,13 +80,13 @@
     (if (:first-open? new-state-map)
       (do
         (log/infof "Channel socket successfully established!: %s" new-state-map)
-        (gui-print :debug (str "Your peer-id is " (:client-id @config) "."))
-        (gui-print :debug "Connected to signaling server.")
+        (@gui-print :debug (str "Your peer-id is " (:client-id @config) "."))
+        (@gui-print :debug "Connected to signaling server.")
         (swap! signaling-status assoc :status :established :state new-state-map)
         (if (some? (:peer-id @config))
           (chsk-send! [:serenity/connect {:peer-id (:peer-id @config)}])
           (do
-            (gui-print :info (help-header))
+            (@gui-print :info (help-header))
             (run-command (:get-peer-link commands)))))
       (do
         (swap! signaling-status assoc :state new-state-map)
@@ -101,7 +103,7 @@
 
 (defmethod -event-msg-handler :serenity/message
   [{:keys [?data] :as ev-msg}]
-  (gui-print :info ?data)
+  (@gui-print :info ?data)
   (log/info (str ":serenity/message handler with message: " ?data)))
 
 (defn initiator? []
@@ -124,7 +126,7 @@
   (let [type (:type metadata)
         blob (js/Blob. (clj->js parts) #js {:type type})
         blob-url (js/URL.createObjectURL blob)]
-    (gui-print [:p [:a {:href blob-url
+    (@gui-print [:p [:a {:href blob-url
                         :download (:name metadata)}
                     (str "Save " (:name metadata))]])))
 
@@ -208,15 +210,15 @@
   (let [{:keys [peer-id]} ?data
         {:keys [chsk-send!]} @channel-socket]
     (swap! signaling-status assoc :status :connected-to-peer :peer peer-id)
-    (gui-print :debug (str "Connecting to " peer-id "..."))
-    (gui-print :debug (str "Connected to " peer-id " on signaling server."))
+    (@gui-print :debug (str "Connecting to " peer-id "..."))
+    (@gui-print :debug (str "Connected to " peer-id " on signaling server."))
     (when (initiator?)
       ;; TODO: change how this works to support reconnects
       (go
         (let [offer (<! (:offer-chan @peer/peer))]
           (swap! signaling-status assoc :status :sent-offer)
-          (gui-print :debug (str "Sending offer:"))
-          (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify offer nil 2)]])
+          (@gui-print :debug (str "Sending offer:"))
+          (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify offer nil 2)]])
           (chsk-send! [:serenity/offer {:offer (js/JSON.stringify offer)}]))))))
 
 (defmethod -event-msg-handler :serenity/offer
@@ -225,14 +227,14 @@
         parsed-offer (js/JSON.parse offer)
         {:keys [chsk-send!]} @channel-socket]
     (swap! signaling-status assoc :status :received-offer)
-    (gui-print :debug (str "Received offer:"))
-    (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-offer nil 2)]])
+    (@gui-print :debug (str "Received offer:"))
+    (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-offer nil 2)]])
     (peer/signal @peer/peer parsed-offer)
     (go
       (let [accept (<! (:accept-chan @peer/peer))]
         (swap! signaling-status assoc :status :sent-accept)
-        (gui-print :debug (str "Sending accept:"))
-        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify accept nil 2)]])
+        (@gui-print :debug (str "Sending accept:"))
+        (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify accept nil 2)]])
         (chsk-send! [:serenity/accept {:accept (js/JSON.stringify accept)}])))))
 
 (defmethod -event-msg-handler :serenity/accept
@@ -240,8 +242,8 @@
   (let [{:keys [accept]} ?data
         parsed-accept (js/JSON.parse accept)]
     (swap! signaling-status assoc :status :received-accept)
-    (gui-print :debug (str "Received accept:"))
-    (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-accept nil 2)]])
+    (@gui-print :debug (str "Received accept:"))
+    (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify parsed-accept nil 2)]])
     (peer/signal @peer/peer parsed-accept)))
 
 (defn event-msg-handler [{:as ev-msg :keys [id ?data event]}]
@@ -255,7 +257,7 @@
   (let [cmd-help (map (fn [[cmd {:keys [description pattern]}]]
                         [:li [:b pattern] " " description])
                       commands)]
-    (gui-print [:div {:class "info"}
+    (@gui-print [:div {:class "info"}
                 (help-header)
                 [:p "Once you're connected, you can share files by dragging and dropping them into this browser window."]
                 [:p "The following commands are also available:"]
@@ -268,7 +270,7 @@
     :handler
     (fn [args]
       (let [{:keys [chsk-send!]} @channel-socket]
-        (gui-print "info" (str "you: " args))
+        (@gui-print "info" (str "you: " args))
         (chsk-send! [:serenity/message (str (:client-id @config) ": " args)])))}
 
    :get-peer-link
@@ -277,7 +279,7 @@
                       "When your friend visits the link, you'll be connected over WebRTC.")
     :handler
     (fn [_]
-      (gui-print [:p [:b "To get started, send this link to your friend: "]
+      (@gui-print [:p [:b "To get started, send this link to your friend: "]
                   [:a {:href (peer-link (:client-id @config))
                        :target "_blank"}
                    (peer-link (:client-id @config))]]))}
@@ -288,24 +290,24 @@
     :handler
     (fn [_]
       (go
-        (gui-print [:p {:class "info"} [:u "Connection status"]])
-        (gui-print :info "Signaling server:")
-        (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
-        (gui-print :info "WebRTC:")
+        (@gui-print [:p {:class "info"} [:u "Connection status"]])
+        (@gui-print :info "Signaling server:")
+        (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify (clj->js @signaling-status) nil 2)]])
+        (@gui-print :info "WebRTC:")
         (let [status (<! (peer/status @peer/peer))]
           (match
            status 
            [:error err]
-           (gui-print :error err)
+           (@gui-print :error err)
 
            [:disconnected]
-           (gui-print [:p {:class "debug"} "Disconnected"])
+           (@gui-print [:p {:class "debug"} "Disconnected"])
 
            [:status {:connected connected :report report}]
            (do
              (oset! js/window "!peer" (:peer @peer/peer))
-             (gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
-             (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
+             (@gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
+             (@gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
 
    :clear
    {:pattern "clear"
@@ -369,7 +371,7 @@
                            (when (not (string/blank? text))
                              (if-let [[cmd args] (parse-command text)]
                                (run-command cmd args)
-                               (gui-print [:p {:class "error"}
+                               (@gui-print [:p {:class "error"}
                                            "Command not found. Type " [:b "help"] " to see available commands."]))
                              (oset! console-input "textContent" "")))))))
 
@@ -461,7 +463,7 @@
                  (go
                    (cond
                      (> 1 (count files))
-                     (gui-print :error "Only one file at a time is supported right now.")
+                     (@gui-print :error "Only one file at a time is supported right now.")
 
                      (let [[status args] (<! (peer/status @peer/peer))]
                        (or (= status :error)
@@ -470,8 +472,8 @@
                             (= status :status)
                             (not (get args :connected)))))
                      (do
-                       (gui-print :error "You must be connected with someone over WebRTC to send files.")
-                       (gui-print [:p {:class "error"}
+                       (@gui-print :error "You must be connected with someone over WebRTC to send files.")
+                       (@gui-print [:p {:class "error"}
                                    "Connect with a peer by sending them your peer link. "
                                    "Type " [:b "help"] " for more details."]))
 
@@ -489,10 +491,10 @@
       :peer {:ice-servers (:ice-servers @config)
              :initiator? (initiator?)
              :on-connect (fn []
-                           (gui-print :success "Connected via WebRTC.")
-                           (gui-print :info "To share a file, drag and drop it into this browser window."))
+                           (@gui-print :success "Connected via WebRTC.")
+                           (@gui-print :info "To share a file, drag and drop it into this browser window."))
              :on-error (fn [err]
-                         (gui-print :error (str "WebRTC error: \"" err "\""))
+                         (@gui-print :error (str "WebRTC error: \"" err "\""))
                          (when (peer/destroyed? @peer/peer)
                            (mount/stop #'peer/peer)
                            (mount/start #'peer/peer)))}})
