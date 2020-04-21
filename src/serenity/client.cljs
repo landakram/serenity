@@ -17,7 +17,9 @@
             [serenity.channel-socket :refer [channel-socket]]
             [goog.string :as gstring]
             [goog.string.format]
-            ["streamsaver" :as streamSaver])
+            ["streamsaver" :as streamSaver]
+            ["web-streams-polyfill/ponyfill" :as web-streams-polyfill]
+            [oops.core :refer [oget oset!]])
   (:require-macros [serenity.macros :refer [when-let*]]))
 
 (declare commands)
@@ -301,7 +303,7 @@
 
            [:status {:connected connected :report report}]
            (do
-             (aset js/window "peer" (:peer @peer/peer))
+             (oset! js/window "!peer" (:peer @peer/peer))
              (gui-print [:p {:class "debug"} (if connected "Connected" "Disconnected")])
              (gui-print [:p {:class "debug"} [:pre (js/JSON.stringify report nil 2)]]))))))}
 
@@ -310,7 +312,7 @@
     :description "Clear console output."
     :handler
     (fn [_]
-      (aset console-el "innerHTML" ""))}
+      (oset! console-el "innerHTML" ""))}
 
    :expand
    {:pattern "expand"
@@ -319,7 +321,7 @@
     (fn [_]
       (let [details (js/document.querySelectorAll "details")]
         (doseq [d (array-seq details)]
-          (aset d "open" true)
+          (oset! d "open" true)
           (js/window.scrollTo 0 js/document.body.scrollHeight))))}
 
    :collapse
@@ -329,7 +331,7 @@
     (fn [_]
       (let [details (js/document.querySelectorAll "details")]
         (doseq [d (array-seq details)]
-          (aset d "open" false)
+          (oset! d "open" false)
           (js/window.scrollTo 0 js/document.body.scrollHeight))))}
 
    :help
@@ -369,7 +371,7 @@
                                (run-command cmd args)
                                (gui-print [:p {:class "error"}
                                            "Command not found. Type " [:b "help"] " to see available commands."]))
-                             (aset console-input "textContent" "")))))))
+                             (oset! console-input "textContent" "")))))))
 
 (defn await [promise]
   (util/produce-from
@@ -382,7 +384,7 @@
    (fn [ch]
      (let [reader (js/FileReader.)]
        (.readAsDataURL reader blob)
-       (aset reader "onload" (fn []
+       (oset! reader "onload" (fn []
                                (go (>! ch (.-result reader)))))))))
 
 (defn deserialize-array-buffer [data-uri]
@@ -478,6 +480,10 @@
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
+    (when (nil? (oget js/window "?WritableStream"))
+      (oset! streamSaver "!WritableStream" web-streams-polyfill/WritableStream)
+      (oset! streamSaver "!TransformStream" web-streams-polyfill/TransformStream))
+
     (mount/start-with-args
      {:router {:event-handler event-msg-handler}
       :peer {:ice-servers (:ice-servers @config)
@@ -496,7 +502,7 @@
     (log/info (str "peer-id: " (:peer-id @config)))
     (log/info (str "csrf-token: " (:csrf-token @config)))
 
-    (aset js/window "console_input" console-input)
+    (oset! js/window "!console_input" console-input)
     (attach-console-input! console-input)
     (attach-console-input-focus! console-input)
     (attach-drag-drop! "#drop-target")
