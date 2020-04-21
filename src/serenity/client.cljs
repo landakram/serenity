@@ -478,14 +478,18 @@
 
 (defn main []
   (let [console-input (js/document.getElementById "console-input")]
-    (mount/start-with-args {:router {:event-handler event-msg-handler}
-                            :peer {:ice-servers (:ice-servers @config)
-                                   :initiator? (initiator?)
-                                   :on-connect (fn []
-                                                 (gui-print :success "Connected via WebRTC.")
-                                                 (gui-print :info "To share a file, drag and drop it into this browser window."))
-                                   :on-error (fn [err]
-                                               (gui-print :error (str "WebRTC error: \"" err "\"")))}})
+    (mount/start-with-args
+     {:router {:event-handler event-msg-handler}
+      :peer {:ice-servers (:ice-servers @config)
+             :initiator? (initiator?)
+             :on-connect (fn []
+                           (gui-print :success "Connected via WebRTC.")
+                           (gui-print :info "To share a file, drag and drop it into this browser window."))
+             :on-error (fn [err]
+                         (gui-print :error (str "WebRTC error: \"" err "\""))
+                         (when (peer/destroyed? @peer/peer)
+                           (mount/stop #'peer/peer)
+                           (mount/start #'peer/peer)))}})
 
     (log/info "Alive.")
     (log/info (str "client-id: " (:client-id @config)))

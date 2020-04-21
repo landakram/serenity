@@ -1,6 +1,6 @@
 (ns serenity.peer
   (:require [taoensso.timbre :as log]
-            [cljs.core.async :refer [chan >! <! go go-loop close! alt! timeout put!]]
+            [cljs.core.async :refer [promise-chan chan >! <! go go-loop close! alt! timeout put!]]
             [mount.core :as mount]
             [serenity.util :as util]
             [serenity.config :refer [config]]
@@ -13,7 +13,7 @@
                               :initiator initiator?
                               :trickle false
                               :config {:iceServers ice-servers}}))
-        offer-chan (chan)
+        offer-chan (promise-chan)
         accept-chan (chan)
         drain-chan (chan)
 
@@ -61,6 +61,9 @@
      :accept-chan accept-chan
      :drain-chan drain-chan
      :data-chan data-chan}))
+
+(defn destroyed? [peer]
+  (.-destroyed (:peer peer)))
 
 (defn signal [{:keys [peer]} offer-or-accept]
   (.signal peer offer-or-accept))
