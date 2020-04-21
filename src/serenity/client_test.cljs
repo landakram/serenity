@@ -33,7 +33,7 @@
                                                :csrf-token "csrf-token"
                                                :ice-servers []}
                      #'serenity.peer/peer peer
-                     #'serenity.client/gui-print (constantly :gui-print)})
+                     #'serenity.client/-gui-print (constantly :gui-print)})
         (mount/with-args {:router {:event-handler client/event-msg-handler}})
         (mount/start))
 
