@@ -1,44 +1,17 @@
-# serenity
+# SERENITY
 
-FIXME: description
-
-## Installation
-
-Download from http://example.com/FIXME.
+> P2P file transfer over WebRTC.
 
 ## Usage
 
-FIXME: explanation
+Serenity is available at [serenity.markhudnall.com](https://serenity.markhudnall.com).
 
-    $ java -jar serenity-0.1.0-standalone.jar [args]
+When you visit Serenity, you'll be connected to a [signaling server](https://www.html5rocks.com/en/tutorials/webrtc/infrastructure/#what-is-signaling) 
+and receive a peer link. Send this peer link to a friend. When they visit the link, you'll be connected to each other over WebRTC. Once you're 
+connected, you can drag and drop files into the browser window to share them.
 
-## Options
+Serenity supports arbitrary file sizes and avoids buffering them in memory by using [StreamSaver](https://github.com/jimmywarting/StreamSaver.js). 
+In practice, I've used Serenity to transfer files up to 4gb.
 
-FIXME: listing of options this app accepts.
-
-## Examples
-
-...
-
-### Bugs
-
-...
-
-### Any Other Sections
-### That You Think
-### Might be Useful
-
-## License
-
-Copyright © 2020 FIXME
-
-This program and the accompanying materials are made available under the
-terms of the Eclipse Public License 2.0 which is available at
-http://www.eclipse.org/legal/epl-2.0.
-
-This Source Code may also be made available under the following Secondary
-Licenses when the conditions for such availability set forth in the Eclipse
-Public License, v. 2.0 are satisfied: GNU General Public License as published by
-the Free Software Foundation, either version 2 of the License, or (at your
-option) any later version, with the GNU Classpath Exception which is available
-at https://www.gnu.org/software/classpath/license.html.
+A number of other commands are also available by typing `help` into the browser window. For example, you can print the status of the WebRTC 
+connection by typing `status`.
